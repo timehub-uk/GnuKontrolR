@@ -1,0 +1,67 @@
+# GnuKontrolR — Customer container SSH hardening
+# Customer SSH is restricted to SFTP-only within their chroot.
+# The secure area (/var/config), system files, and gnukontrolr-admin
+# are completely invisible and inaccessible from any SSH session.
+
+Port 22
+Protocol 2
+
+# Host keys — ED25519 preferred (strongest), RSA as fallback
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+# ── Authentication ────────────────────────────────────────────────────────────
+PermitRootLogin no
+PasswordAuthentication no              # key-only — no brute-force risk
+PubkeyAuthentication yes
+AuthorizedKeysFile /home/www-data/.ssh/authorized_keys
+AuthenticationMethods publickey
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+KerberosAuthentication no
+GSSAPIAuthentication no
+UsePAM no
+
+# ── Restrict to customer user only ───────────────────────────────────────────
+AllowUsers www-data
+DenyUsers root gnukontrolr-admin webpanel-sys
+
+# ── Customer chroot (SFTP only) ────────────────────────────────────────────
+# www-data is chrooted to /var/chroot — only /html and /customer are visible.
+# /var/config is NOT in the chroot and is never visible to SSH clients.
+# ForceCommand prevents shell access — SFTP file transfer only.
+Match User www-data
+    ChrootDirectory /var/chroot
+    ForceCommand internal-sftp -d /html -l INFO
+    X11Forwarding no
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    PermitTunnel no
+    Banner none
+
+# ── Network hardening ─────────────────────────────────────────────────────────
+MaxAuthTries 3
+MaxSessions 2
+LoginGraceTime 20
+ClientAliveInterval 60
+ClientAliveCountMax 2
+TCPKeepAlive no
+
+# ── Features off ─────────────────────────────────────────────────────────────
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+PermitTunnel no
+GatewayPorts no
+PrintMotd no
+PrintLastLog no
+AcceptEnv LANG LC_*
+
+# ── Ciphers & algorithms (modern only) ───────────────────────────────────────
+Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,chacha20-poly1305@openssh.com
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+SyslogFacility AUTH
+LogLevel VERBOSE

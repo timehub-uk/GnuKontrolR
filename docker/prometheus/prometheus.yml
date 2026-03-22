@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Host CPU / memory / disk / network
+  - job_name: "node"
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # Docker container metrics (CPU, mem, net per container)
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  # WebPanel API metrics endpoint
+  - job_name: "webpanel"
+    static_configs:
+      - targets: ["webpanel:8000"]
+    metrics_path: /api/metrics
+
+  # Redis metrics (if redis_exporter added later)
+  # - job_name: "redis"
+  #   static_configs:
+  #     - targets: ["redis-exporter:9121"]
