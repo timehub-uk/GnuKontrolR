@@ -22,7 +22,8 @@ MIN_COMPOSE="2.20"
 # When piped from curl, BASH_SOURCE[0] is not a file — detect this so we can
 # clone the repo and re-exec the real install.sh from inside it.
 RUNNING_FROM_CURL=false
-[[ "${BASH_SOURCE[0]}" == "/dev/stdin" || "${BASH_SOURCE[0]}" == "bash" || ! -f "${BASH_SOURCE[0]}" ]] && RUNNING_FROM_CURL=true
+_src="${BASH_SOURCE[0]:-}"
+[[ -z "$_src" || "$_src" == "/dev/stdin" || "$_src" == "bash" || ! -f "$_src" ]] && RUNNING_FROM_CURL=true
 
 # ─── Banner ───────────────────────────────────────────────────────────────────
 echo -e "${BOLD}"
