@@ -19,6 +19,11 @@ REPO_URL="https://github.com/timehub-uk/GnuKontrolR.git"
 MIN_DOCKER="24.0"
 MIN_COMPOSE="2.20"
 
+# When piped from curl, BASH_SOURCE[0] is not a file — detect this so we can
+# clone the repo and re-exec the real install.sh from inside it.
+RUNNING_FROM_CURL=false
+[[ "${BASH_SOURCE[0]}" == "/dev/stdin" || "${BASH_SOURCE[0]}" == "bash" || ! -f "${BASH_SOURCE[0]}" ]] && RUNNING_FROM_CURL=true
+
 # ─── Banner ───────────────────────────────────────────────────────────────────
 echo -e "${BOLD}"
 cat <<'EOF'
@@ -34,6 +39,26 @@ echo -e "${NC}"
 
 # ─── Root check ──────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "Run as root: sudo bash install.sh"
+
+# ─── If piped from curl: clone first, then re-exec the real install.sh ───────
+if $RUNNING_FROM_CURL; then
+  header "Bootstrapping from curl"
+  need_curl() { command -v curl &>/dev/null || { apt-get update -qq && apt-get install -y -qq curl; }; }
+  need_git()  { command -v git  &>/dev/null || { apt-get update -qq && apt-get install -y -qq git;  }; }
+  need_curl; need_git
+
+  if [[ -d "$INSTALL_DIR/.git" ]]; then
+    info "Updating existing install at $INSTALL_DIR..."
+    git -C "$INSTALL_DIR" pull --ff-only
+  else
+    info "Cloning GnuKontrolR to $INSTALL_DIR..."
+    mkdir -p "$(dirname "$INSTALL_DIR")"
+    git clone "$REPO_URL" "$INSTALL_DIR"
+  fi
+  ok "Repository ready"
+  info "Re-running installer from $INSTALL_DIR/install.sh..."
+  exec bash "$INSTALL_DIR/install.sh"
+fi
 
 # ─── OS check ────────────────────────────────────────────────────────────────
 header "Checking system"
@@ -245,3 +270,22 @@ echo -e "  Manage with : ${BOLD}cd $INSTALL_DIR && docker compose [up|down|logs]
 echo ""
 echo -e "${YELLOW}  ⚠  Keep .env secure — it contains all secrets${NC}"
 echo ""
+
+# ─── Launch browser ──────────────────────────────────────────────────────────
+PANEL_URL="https://${PANEL_DOMAIN_VAL:-localhost}"
+
+open_browser() {
+  # Try common browser launchers in order
+  for cmd in xdg-open open sensible-browser gnome-open x-www-browser; do
+    if command -v "$cmd" &>/dev/null; then
+      info "Opening $PANEL_URL in browser..."
+      nohup "$cmd" "$PANEL_URL" &>/dev/null &
+      return 0
+    fi
+  done
+  # No GUI browser available (headless server) — print instructions instead
+  warn "No graphical browser detected."
+  info "Open this URL in your browser: ${CYAN}${PANEL_URL}${NC}"
+}
+
+open_browser
