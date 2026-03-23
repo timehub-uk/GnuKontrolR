@@ -18,6 +18,9 @@ import BackupsPage       from './pages/BackupsPage';
 import TerminalPage      from './pages/TerminalPage';
 import SettingsPage      from './pages/SettingsPage';
 import AdminContentPage  from './pages/AdminContentPage';
+import ActivityLogPage   from './pages/ActivityLogPage';
+import SecurityPage      from './pages/SecurityPage';
+import MenuPage          from './pages/MenuPage';
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -46,10 +49,13 @@ export default function App() {
                 <Route path="/databases" element={<DatabasesPage />} />
                 <Route path="/email"     element={<EmailPage />} />
                 <Route path="/ssl"       element={<SslPage />} />
+                <Route path="/security"  element={<SecurityPage />} />
                 <Route path="/logs"      element={<LogsPage />} />
                 <Route path="/backups"   element={<BackupsPage />} />
                 <Route path="/terminal"  element={<TerminalPage />} />
-                <Route path="/settings"  element={<SettingsPage />} />
+                <Route path="/settings"      element={<SettingsPage />} />
+                <Route path="/activity-log" element={<ActivityLogPage />} />
+                <Route path="/menu"         element={<MenuPage />} />
               </Routes>
             </Layout>
           </Protected>

@@ -93,3 +93,18 @@ def require_role(*roles: Role):
 require_superadmin = require_role(Role.superadmin)
 require_admin      = require_role(Role.superadmin, Role.admin)
 require_reseller   = require_role(Role.superadmin, Role.admin, Role.reseller)
+
+
+def _decode_token(token: str) -> Optional[int]:
+    """
+    Lightweight token → user_id decode used by the request-logging middleware.
+    Returns None on any error rather than raising — logging must never block a request.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "access":
+            return None
+        sub = payload.get("sub")
+        return int(sub) if sub else None
+    except Exception:
+        return None

@@ -112,5 +112,26 @@ if [ ! -f /var/db/id_ecdsa ]; then
     chmod 600 /var/db/id_ecdsa
 fi
 
+# ── Container API TLS (self-signed, internal network only) ────────────────────
+# Encrypts all panel ↔ container API traffic on the Docker network.
+# Traffic never leaves the internal bridge — cert verification uses pinning
+# via the shared CONTAINER_API_TOKEN; the self-signed cert protects against
+# passive sniffing or rogue containers on the same bridge.
+if [ ! -f /var/db/api_cert.pem ]; then
+    mkdir -p /var/db
+    openssl req -x509 -newkey ec \
+        -pkeyopt ec_paramgen_curve:P-384 \
+        -keyout /var/db/api_key.pem \
+        -out /var/db/api_cert.pem \
+        -days 3650 -nodes \
+        -subj "/CN=gnukontrolr-${DOMAIN}/O=GnuKontrolR/C=XX" \
+        -addext "subjectAltName=DNS:$(hostname),IP:127.0.0.1" 2>/dev/null || true
+    # gnukontrolr-admin must be able to read these (it runs the API)
+    chown gnukontrolr-admin:gnukontrolr /var/db/api_cert.pem /var/db/api_key.pem 2>/dev/null || true
+    chmod 640 /var/db/api_cert.pem
+    chmod 600 /var/db/api_key.pem
+    echo "[webpanel] Generated container API TLS certificate for ${DOMAIN}"
+fi
+
 echo "[webpanel] Starting container for domain: ${DOMAIN} (web: ${WEB_SERVER})"
 exec "$@"

@@ -23,6 +23,11 @@ import hmac
 import hashlib
 import time
 import logging
+import threading
+import secrets
+import string
+import urllib.request
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from flask import Flask, request, jsonify, abort
@@ -274,6 +279,91 @@ def list_private():
     return jsonify(_dir_listing(d, rel))
 
 
+# ── Config backup helpers ─────────────────────────────────────────────────────
+
+CONFIG_BACKUPS_ROOT = SECURE_ROOT / ".backups"
+BACKUP_KEEP         = 3   # rolling window depth
+
+AREA_DIRS = {
+    "nginx": NGINX_CONF_DIR,
+    "php":   PHP_CONF_DIR,
+    "env":   ENV_DIR,
+    "ssl":   SSL_DIR,
+}
+
+
+def _backup_file(filepath: Path):
+    """Snapshot filepath into .backups/{area}/{filename}/, keeping BACKUP_KEEP versions."""
+    if not filepath.exists():
+        return
+    area = filepath.parent.name          # nginx / php / env / ssl
+    snap_dir = CONFIG_BACKUPS_ROOT / area / filepath.name
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    ts   = str(int(time.time()))
+    dest = snap_dir / f"{ts}.bak"
+    shutil.copy2(str(filepath), str(dest))
+    # Purge oldest beyond the keep limit
+    snaps = sorted(snap_dir.glob("*.bak"), key=lambda p: int(p.stem))
+    for old in snaps[:-BACKUP_KEEP]:
+        old.unlink(missing_ok=True)
+    log.info("Backed up %s → %s", filepath, dest)
+
+
+@app.get("/backups/<area>")
+def list_backups(area: str):
+    """List rolling snapshots for a config area (nginx/php/env/ssl)."""
+    _verify_token()
+    if area not in AREA_DIRS:
+        abort(400)
+    backup_root = CONFIG_BACKUPS_ROOT / area
+    if not backup_root.exists():
+        return jsonify({"area": area, "files": []})
+    result = []
+    for file_dir in sorted(backup_root.iterdir()):
+        if not file_dir.is_dir():
+            continue
+        snaps = sorted(file_dir.glob("*.bak"), key=lambda p: int(p.stem), reverse=True)
+        if snaps:
+            result.append({
+                "filename": file_dir.name,
+                "snapshots": [
+                    {
+                        "ts":       int(s.stem),
+                        "size":     s.stat().st_size,
+                        "datetime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(s.stem))),
+                    }
+                    for s in snaps
+                ],
+            })
+    return jsonify({"area": area, "files": result})
+
+
+@app.post("/restore/<area>")
+def restore_backup(area: str):
+    """Restore a named snapshot — saves current state first, then overwrites."""
+    _verify_token()
+    if area not in AREA_DIRS:
+        abort(400)
+    body     = request.json or {}
+    filename = re.sub(r"[^a-zA-Z0-9._-]", "", body.get("filename", ""))
+    ts_raw   = re.sub(r"[^0-9]",          "", str(body.get("ts", "")))
+    if not filename or not ts_raw:
+        abort(400)
+    snap = CONFIG_BACKUPS_ROOT / area / filename / f"{ts_raw}.bak"
+    if not snap.exists():
+        abort(404)
+    target = AREA_DIRS[area] / filename
+    _backup_file(target)   # snapshot current before overwriting
+    shutil.copy2(str(snap), str(target))
+    # Reload affected service
+    if area == "nginx":
+        subprocess.run(["supervisorctl", "restart", "nginx"],   timeout=10)
+    elif area == "php":
+        subprocess.run(["supervisorctl", "restart", "php-fpm"], timeout=10)
+    log.info("Restored %s/%s from ts=%s", area, filename, ts_raw)
+    return jsonify({"ok": True, "restored": filename, "from_ts": int(ts_raw)})
+
+
 # ── SECURE AREA (API controls only) ──────────────────────────────────────────
 
 @app.get("/secure/env")
@@ -314,6 +404,7 @@ def set_env_var():
                 k, _, v = line.partition("=")
                 existing[k.strip()] = v.strip()
     existing[key] = value
+    _backup_file(env_file)
     env_file.write_text("\n".join(f"{k}={v}" for k, v in existing.items()) + "\n")
     return jsonify({"ok": True})
 
@@ -326,6 +417,7 @@ def set_nginx_config():
     name    = re.sub(r"[^a-z0-9_-]", "", body.get("name", "custom"))
     content = body.get("content", "")
     conf_file = NGINX_CONF_DIR / f"{name}.conf"
+    _backup_file(conf_file)
     conf_file.write_text(content)
     # Reload nginx
     subprocess.run(["supervisorctl", "restart", "nginx"], timeout=10)
@@ -346,6 +438,7 @@ def set_php_config():
     body = request.json or {}
     content = body.get("content", "")
     ini_file = PHP_CONF_DIR / "customer.ini"
+    _backup_file(ini_file)
     ini_file.write_text(content)
     subprocess.run(["supervisorctl", "restart", "php-fpm"], timeout=10)
     return jsonify({"ok": True})
@@ -367,8 +460,10 @@ def upload_ssl():
     cert = body.get("cert", "")
     key  = body.get("key", "")
     if cert:
+        _backup_file(SSL_DIR / "site.crt")
         (SSL_DIR / "site.crt").write_text(cert)
     if key:
+        _backup_file(SSL_DIR / "site.key")
         (SSL_DIR / "site.key").write_text(key)
         (SSL_DIR / "site.key").chmod(0o600)
     return jsonify({"ok": True})
@@ -387,9 +482,1631 @@ def exec_command():
     return jsonify({"ok": r.returncode == 0, "stdout": r.stdout, "stderr": r.stderr})
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ── One-Click App Marketplace ─────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+APP_CACHE_DIR       = Path("/var/cache/gnukontrolr/apps")
+INSTALLED_APPS_FILE = DB_DIR / "installed_apps.json"
+MYSQL_ROOT_PASS     = os.environ.get("MYSQL_ROOT_PASSWORD", "")
+
+# In-memory job tracking (survives until container restart)
+_install_jobs: dict = {}
+
+APP_DOWNLOADS = {
+    "wordpress":  ("https://wordpress.org/latest.tar.gz",                                               "wordpress.tar.gz"),
+    "joomla":     ("https://downloads.joomla.org/cms/joomla5/latest/Joomla_latest-Stable-Full_Package.tar.gz", "joomla.tar.gz"),
+    "drupal":     ("https://www.drupal.org/download-latest/tar.gz",                                      "drupal.tar.gz"),
+    "grav":       ("https://getgrav.org/download/core/grav/latest",                                      "grav.zip"),
+    "roundcube":  ("https://github.com/roundcube/roundcubemail/releases/download/1.6.9/roundcubemail-1.6.9-complete.tar.gz", "roundcube.tar.gz"),
+    "snappymail": ("https://github.com/the-djmaze/snappymail/releases/download/v2.38.2/snappymail-2.38.2.tar.gz", "snappymail.tar.gz"),
+    "phpmyadmin": ("https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz",  "phpmyadmin.tar.gz"),
+    "adminer":    ("https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php",         "adminer.php"),
+    "ghost":        ("https://github.com/TryGhost/Ghost/releases/download/v5.82.2/Ghost-5.82.2.zip",                                                                "ghost.zip"),
+    "october":      ("https://github.com/octobercms/october/archive/refs/tags/v3.5.30.tar.gz",                                                                      "october.tar.gz"),
+    "concrete":     ("https://www.concretecms.org/download_file/-/view/110619/",                                                                                     "concrete.zip"),
+    "typo3":        ("https://get.typo3.org/12/tar.gz",                                                                                                              "typo3.tar.gz"),
+    "strapi":       ("https://registry.npmjs.org/create-strapi-app/-/create-strapi-app-4.25.4.tgz",                                                                  "strapi.tgz"),
+    "matomo":       ("https://builds.matomo.org/matomo-5.0.3.zip",                                                                                                   "matomo.zip"),
+    "umami":        ("https://github.com/umami-software/umami/archive/refs/tags/v2.10.2.tar.gz",                                                                     "umami.tar.gz"),
+    "freshrss":     ("https://github.com/FreshRSS/FreshRSS/archive/refs/tags/1.24.1.tar.gz",                                                                        "freshrss.tar.gz"),
+    "nextcloud":    ("https://download.nextcloud.com/server/releases/nextcloud-28.0.3.tar.bz2",                                                                      "nextcloud.tar.bz2"),
+    "bookstack":    ("https://github.com/BookStackApp/BookStack/archive/refs/tags/v23.12.2.tar.gz",                                                                  "bookstack.tar.gz"),
+    "wikijs":       ("https://github.com/requarks/wiki/releases/download/v2.5.303/wiki-js.tar.gz",                                                                   "wikijs.tar.gz"),
+    "gitea":        ("https://dl.gitea.com/gitea/1.21.11/gitea-1.21.11-linux-amd64",                                                                                "gitea-bin"),
+    "codeserver":   ("https://github.com/coder/code-server/releases/download/v4.22.1/code-server-4.22.1-linux-amd64.tar.gz",                                        "codeserver.tar.gz"),
+    "n8n":          ("https://registry.npmjs.org/n8n/-/n8n-1.36.4.tgz",                                                                                             "n8n.tgz"),
+    "nodered":      ("https://registry.npmjs.org/@node-red/node-red/-/node-red-3.1.9.tgz",                                                                           "nodered.tgz"),
+    "filebrowser":  ("https://github.com/filebrowser/filebrowser/releases/download/v2.27.0/linux-amd64-filebrowser.tar.gz",                                         "filebrowser.tar.gz"),
+    "uptime":       ("https://github.com/louislam/uptime-kuma/archive/refs/tags/1.23.11.tar.gz",                                                                     "uptime-kuma.tar.gz"),
+    "vaultwarden":  ("https://github.com/dani-garcia/vaultwarden/releases/download/1.30.5/vaultwarden-1.30.5-linux-amd64.tar.gz",                                   "vaultwarden.tar.gz"),
+    "invoiceninja": ("https://github.com/invoiceninja/invoiceninja/releases/download/v5.8.40/invoiceninja.zip",                                                      "invoiceninja.zip"),
+    "prestashop":  ("https://github.com/PrestaShop/PrestaShop/releases/download/8.1.7/prestashop_8.1.7.zip", "prestashop.zip"),
+    "opencart":    ("https://github.com/opencart/opencart/releases/download/4.0.2.3/opencart-4.0.2.3.tar.gz", "opencart.tar.gz"),
+    "woocommerce": ("https://wordpress.org/latest.tar.gz", "wordpress-woo.tar.gz"),  # WP+WooCommerce
+    "piwigo":      ("https://piwigo.org/download/dlcounter.php?code=latest", "piwigo.zip"),
+    "lychee":      ("https://github.com/LycheeOrg/Lychee/releases/download/v5.5.1/Lychee.zip", "lychee.zip"),
+    "jellyfin":    ("https://github.com/jellyfin/jellyfin/releases/download/v10.9.2/jellyfin_10.9.2_linux-amd64.tar.gz", "jellyfin.tar.gz"),
+    "moodle":      ("https://download.moodle.org/download.php/direct/stable404/moodle-latest-404.tgz", "moodle.tgz"),
+    "monica":      ("https://github.com/monicahq/monica/releases/download/v4.1.2/monica-v4.1.2.tar.gz", "monica.tar.gz"),
+    "yourls":      ("https://github.com/YOURLS/YOURLS/releases/download/1.9.2/yourls-1.9.2.zip", "yourls.zip"),
+    "grafana":     ("https://dl.grafana.com/oss/release/grafana-10.4.2.linux-amd64.tar.gz", "grafana.tar.gz"),
+    "netdata":     ("https://github.com/netdata/netdata/releases/download/v1.45.0/netdata-v1.45.0.tar.gz", "netdata.tar.gz"),
+}
+
+
+def _rand_str(n: int = 20) -> str:
+    return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(n))
+
+
+def _push(job_id: str, msg: str):
+    log.info("[install:%s] %s", job_id, msg)
+    if job_id in _install_jobs:
+        _install_jobs[job_id]["messages"].append(msg)
+
+
+def _mysql_exec(sql: str) -> tuple[bool, str]:
+    cmd = ["mysql", "-uroot", "--batch", "--silent"]
+    if MYSQL_ROOT_PASS:
+        cmd += [f"-p{MYSQL_ROOT_PASS}"]
+    cmd += ["-e", sql]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    return r.returncode == 0, (r.stderr or r.stdout).strip()
+
+
+def _create_db(db_name: str, db_user: str, db_pass: str) -> tuple[bool, str]:
+    sql = (
+        f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
+        f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "
+        f"CREATE USER IF NOT EXISTS '{db_user}'@'localhost' IDENTIFIED BY '{db_pass}'; "
+        f"GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{db_user}'@'localhost'; "
+        f"FLUSH PRIVILEGES;"
+    )
+    return _mysql_exec(sql)
+
+
+def _download_cached(app_id: str, url: str, filename: str, job_id: str) -> Path:
+    APP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = APP_CACHE_DIR / filename
+    if dest.exists():
+        _push(job_id, f"Using cached package ({dest.stat().st_size // 1024} KB)")
+    else:
+        _push(job_id, f"Downloading {app_id} from official source…")
+        req = urllib.request.Request(url, headers={"User-Agent": "GnuKontrolR/1.0"})
+        with urllib.request.urlopen(req, timeout=120) as resp, open(str(dest), "wb") as fh:
+            shutil.copyfileobj(resp, fh)
+        _push(job_id, f"Downloaded {dest.stat().st_size // 1024} KB")
+    return dest
+
+
+def _set_permissions(path: Path):
+    subprocess.run(["chown", "-R", "www-data:www-data", str(path)], timeout=60, check=False)
+    subprocess.run(["find", str(path), "-type", "d", "-exec", "chmod", "755", "{}", "+"], timeout=60, check=False)
+    subprocess.run(["find", str(path), "-type", "f", "-exec", "chmod", "644", "{}", "+"], timeout=60, check=False)
+
+
+def _target_dir(install_path: str) -> Path:
+    """Resolve the webroot install target safely."""
+    rel = install_path.strip("/") or ""
+    if rel:
+        tgt = (PUBLIC_ROOT / rel).resolve()
+        if not str(tgt).startswith(str(PUBLIC_ROOT.resolve())):
+            raise ValueError("Invalid install path")
+        tgt.mkdir(parents=True, exist_ok=True)
+        return tgt
+    return PUBLIC_ROOT
+
+
+def _record_installed(app_id: str, result: dict):
+    data: dict = {}
+    if INSTALLED_APPS_FILE.exists():
+        try:
+            data = json.loads(INSTALLED_APPS_FILE.read_text())
+        except Exception:
+            pass
+    data.setdefault("apps", [])
+    data["apps"] = [a for a in data["apps"] if a.get("id") != app_id]
+    data["apps"].append({"id": app_id, "installed_at": int(time.time()), **result})
+    INSTALLED_APPS_FILE.write_text(json.dumps(data, indent=2))
+
+
+# ── Per-app installers ────────────────────────────────────────────────────────
+
+def _install_wordpress(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["wordpress"]
+    archive = _download_cached("wordpress", url, filename, job_id)
+
+    _push(job_id, "Extracting WordPress…")
+    tgt = _target_dir(cfg.get("install_path", "/"))
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+        wp_src = Path(tmp) / "wordpress"
+        for item in wp_src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    _push(job_id, "Writing wp-config.php…")
+    sample = tgt / "wp-config-sample.php"
+    if not sample.exists():
+        raise RuntimeError("wp-config-sample.php not found — extraction may have failed")
+    content = sample.read_text()
+    for old, new in [("database_name_here", db_name), ("username_here", db_user),
+                     ("password_here", db_pass)]:
+        content = content.replace(old, new, 1)
+    # Replace placeholder security keys with random values
+    for _ in range(8):
+        content = content.replace("put your unique phrase here", _rand_str(64), 1)
+    (tgt / "wp-config.php").write_text(content)
+
+    _push(job_id, "Setting file permissions…")
+    _set_permissions(tgt)
+
+    # Try WP-CLI for headless install
+    wp_cli = shutil.which("wp")
+    if wp_cli:
+        _push(job_id, "Running wp-cli installer…")
+        r = subprocess.run([
+            wp_cli, "core", "install",
+            f"--url=https://{DOMAIN}", f"--title={cfg.get('site_title','My Site')}",
+            f"--admin_user={cfg.get('admin_user','admin')}",
+            f"--admin_password={cfg['admin_pass']}",
+            f"--admin_email={cfg.get('admin_email','admin@'+DOMAIN)}",
+            "--path", str(tgt), "--allow-root",
+        ], capture_output=True, text=True, timeout=120)
+        if r.returncode == 0:
+            _push(job_id, "WordPress fully installed via WP-CLI ✓")
+        else:
+            _push(job_id, "WP-CLI step failed — complete setup via browser wizard")
+    else:
+        _push(job_id, "WP-CLI not found — visit the site URL to complete setup via browser wizard")
+
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/wp-admin/"}
+
+
+def _install_joomla(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["joomla"]
+    archive = _download_cached("joomla", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Joomla…")
+    subprocess.run(["tar", "-xzf", str(archive), "-C", str(tgt)], check=True, timeout=60)
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    _push(job_id, "Setting file permissions…")
+    _set_permissions(tgt)
+    _push(job_id, "Joomla files extracted ✓ — visit the site URL to complete the web installer")
+
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/administrator/"}
+
+
+def _install_drupal(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["drupal"]
+    archive = _download_cached("drupal", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Drupal…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+        extracted = sorted(Path(tmp).iterdir())[0]  # drupal-10.x.y/
+        for item in extracted.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    _set_permissions(tgt)
+    _push(job_id, "Drupal extracted ✓ — complete installation via the web installer")
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/core/install.php"}
+
+
+def _install_grav(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["grav"]
+    archive = _download_cached("grav", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Grav…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["unzip", "-q", str(archive), "-d", tmp], check=True, timeout=60)
+        src = Path(tmp) / "grav"
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    _set_permissions(tgt)
+    _push(job_id, "Grav extracted ✓ — no database required, site is ready")
+    return {"url": f"https://{DOMAIN}"}
+
+
+def _install_roundcube(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["roundcube"]
+    archive = _download_cached("roundcube", url, filename, job_id)
+    ipath = cfg.get("install_path", "webmail").strip("/") or "webmail"
+    tgt = _target_dir(ipath)
+
+    _push(job_id, "Extracting Roundcube…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+        src = sorted(Path(tmp).iterdir())[0]
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"DB creation failed: {err}")
+
+    _push(job_id, "Writing Roundcube config…")
+    config_dir = tgt / "config"
+    config_dir.mkdir(exist_ok=True)
+    sample = tgt / "config" / "config.inc.php.sample"
+    cfg_text = sample.read_text() if sample.exists() else "<?php\n"
+    des_key = _rand_str(24)
+    rc_config = (
+        f"<?php\n"
+        f"$config['db_dsnw'] = 'mysql://{db_user}:{db_pass}@localhost/{db_name}';\n"
+        f"$config['des_key'] = '{des_key}';\n"
+        f"$config['default_host'] = 'localhost';\n"
+        f"$config['smtp_server'] = 'localhost';\n"
+        f"$config['smtp_port'] = 587;\n"
+        f"$config['product_name'] = 'Webmail';\n"
+        f"$config['plugins'] = ['archive', 'zipdownload'];\n"
+    )
+    (tgt / "config" / "config.inc.php").write_text(rc_config)
+
+    # Init DB
+    sql_file = tgt / "SQL" / "mysql.initial.sql"
+    if sql_file.exists():
+        _push(job_id, "Initialising Roundcube database schema…")
+        cmd = ["mysql", "-uroot", db_name]
+        if MYSQL_ROOT_PASS:
+            cmd.insert(2, f"-p{MYSQL_ROOT_PASS}")
+        with open(str(sql_file)) as f:
+            subprocess.run(cmd, stdin=f, check=False, timeout=30)
+
+    _set_permissions(tgt)
+    _push(job_id, "Roundcube installed ✓")
+    return {"url": f"https://{DOMAIN}/{ipath}/"}
+
+
+def _install_snappymail(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["snappymail"]
+    archive = _download_cached("snappymail", url, filename, job_id)
+    ipath = cfg.get("install_path", "snappymail").strip("/") or "snappymail"
+    tgt = _target_dir(ipath)
+
+    _push(job_id, "Extracting SnappyMail…")
+    subprocess.run(["tar", "-xzf", str(archive), "-C", str(tgt)], check=True, timeout=60)
+    _set_permissions(tgt)
+    _push(job_id, "SnappyMail installed ✓ — no database required")
+    return {"url": f"https://{DOMAIN}/{ipath}/"}
+
+
+def _install_phpmyadmin(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["phpmyadmin"]
+    archive = _download_cached("phpmyadmin", url, filename, job_id)
+    ipath = cfg.get("install_path", "phpmyadmin").strip("/") or "phpmyadmin"
+    tgt = _target_dir(ipath)
+
+    _push(job_id, "Extracting phpMyAdmin…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+        src = sorted(Path(tmp).iterdir())[0]
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    _push(job_id, "Writing phpMyAdmin config…")
+    blowfish = _rand_str(32)
+    pma_cfg = (
+        "<?php\n"
+        f"$cfg['blowfish_secret'] = '{blowfish}';\n"
+        "$cfg['Servers'][1]['auth_type'] = 'cookie';\n"
+        "$cfg['Servers'][1]['host'] = 'localhost';\n"
+        "$cfg['Servers'][1]['compress'] = false;\n"
+        "$cfg['Servers'][1]['AllowNoPassword'] = false;\n"
+    )
+    (tgt / "config.inc.php").write_text(pma_cfg)
+    _set_permissions(tgt)
+    _push(job_id, "phpMyAdmin installed ✓")
+    return {"url": f"https://{DOMAIN}/{ipath}/"}
+
+
+def _install_adminer(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["adminer"]
+    _download_cached("adminer", url, filename, job_id)
+    ipath = cfg.get("install_path", "adminer").strip("/") or "adminer"
+    tgt = _target_dir(ipath)
+
+    _push(job_id, "Installing Adminer (single PHP file)…")
+    shutil.copy2(str(APP_CACHE_DIR / filename), str(tgt / "index.php"))
+    _set_permissions(tgt)
+    _push(job_id, "Adminer installed ✓")
+    return {"url": f"https://{DOMAIN}/{ipath}/"}
+
+
+def _install_ghost(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["ghost"]
+    archive = _download_cached("ghost", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Ghost…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["unzip", "-q", str(archive), "-d", tmp], check=True, timeout=120)
+        src = Path(tmp)
+        extracted = sorted(src.iterdir())
+        if extracted and extracted[0].is_dir():
+            src = extracted[0]
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    _push(job_id, "Running npm install --production for Ghost…")
+    subprocess.run(["npm", "install", "--production"], cwd=str(tgt),
+                   capture_output=True, timeout=300, check=False)
+
+    _push(job_id, "Writing Ghost config…")
+    ghost_config = {
+        "url": f"https://{DOMAIN}",
+        "server": {"port": 2368, "host": "0.0.0.0"},
+        "database": {
+            "client": "sqlite3",
+            "connection": {"filename": "/var/customer/private/ghost.db"},
+        },
+        "mail": {"transport": "Direct"},
+        "logging": {"transports": ["stdout"]},
+        "process": "local",
+        "paths": {"contentPath": str(tgt / "content")},
+    }
+    (tgt / "config.production.json").write_text(json.dumps(ghost_config, indent=2))
+
+    _set_permissions(tgt)
+    _push(job_id, "Ghost installed ✓ — start with: NODE_ENV=production node index.js (port 2368)")
+    return {"url": f"https://{DOMAIN}", "note": "Runs on port 2368 — configure reverse proxy"}
+
+
+def _install_october(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["october"]
+    archive = _download_cached("october", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting October CMS…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
+        extracted = sorted(Path(tmp).iterdir())[0]
+        for item in extracted.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    import base64
+    app_key = "base64:" + base64.b64encode(_rand_str(32).encode()).decode()
+    env_content = (
+        f"APP_NAME=OctoberCMS\n"
+        f"APP_ENV=production\n"
+        f"APP_KEY={app_key}\n"
+        f"APP_DEBUG=false\n"
+        f"APP_URL=https://{DOMAIN}\n"
+        f"DB_CONNECTION=mysql\n"
+        f"DB_HOST=127.0.0.1\n"
+        f"DB_PORT=3306\n"
+        f"DB_DATABASE={db_name}\n"
+        f"DB_USERNAME={db_user}\n"
+        f"DB_PASSWORD={db_pass}\n"
+    )
+    (tgt / ".env").write_text(env_content)
+
+    _push(job_id, "Running October CMS install…")
+    artisan = tgt / "artisan"
+    if artisan.exists():
+        subprocess.run(["php", str(artisan), "october:install", "--no-interaction"],
+                       cwd=str(tgt), capture_output=True, timeout=120, check=False)
+
+    _set_permissions(tgt)
+    _push(job_id, "October CMS extracted ✓ — complete setup via browser wizard if needed")
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/backend/"}
+
+
+def _install_concrete(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["concrete"]
+    archive = _download_cached("concrete", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Concrete CMS…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["unzip", "-q", str(archive), "-d", tmp], check=True, timeout=120)
+        extracted = sorted(Path(tmp).iterdir())
+        src = extracted[0] if extracted and extracted[0].is_dir() else Path(tmp)
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    _set_permissions(tgt)
+    _push(job_id, "Concrete CMS extracted ✓ — complete setup via browser install wizard")
+    return {"url": f"https://{DOMAIN}/index.php/install"}
+
+
+def _install_typo3(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["typo3"]
+    archive = _download_cached("typo3", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting TYPO3…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
+        extracted = sorted(Path(tmp).iterdir())[0]
+        for item in extracted.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    # Create FIRST_INSTALL marker to trigger web-based setup wizard
+    (tgt / "FIRST_INSTALL").touch()
+
+    _set_permissions(tgt)
+    _push(job_id, "TYPO3 extracted ✓ — visit the site URL to complete installation wizard")
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/typo3/"}
+
+
+def _install_strapi(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["strapi"]
+    archive = _download_cached("strapi", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Strapi package…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
+        # npm tarballs extract to a `package/` subdirectory
+        src = Path(tmp) / "package"
+        if not src.exists():
+            extracted = sorted(Path(tmp).iterdir())
+            src = extracted[0] if extracted else Path(tmp)
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    import base64
+    keys = ",".join(base64.b64encode(_rand_str(16).encode()).decode() for _ in range(4))
+    env_content = (
+        f"HOST=0.0.0.0\n"
+        f"PORT=1337\n"
+        f"APP_KEYS={keys}\n"
+        f"API_TOKEN_SALT={_rand_str(32)}\n"
+        f"ADMIN_JWT_SECRET={_rand_str(32)}\n"
+        f"JWT_SECRET={_rand_str(32)}\n"
+        f"DATABASE_CLIENT=mysql\n"
+        f"DATABASE_HOST=127.0.0.1\n"
+        f"DATABASE_PORT=3306\n"
+        f"DATABASE_NAME={db_name}\n"
+        f"DATABASE_USERNAME={db_user}\n"
+        f"DATABASE_PASSWORD={db_pass}\n"
+        f"NODE_ENV=production\n"
+    )
+    (tgt / ".env").write_text(env_content)
+
+    _push(job_id, "Running npm install for Strapi…")
+    subprocess.run(["npm", "install"], cwd=str(tgt),
+                   capture_output=True, timeout=300, check=False)
+
+    _set_permissions(tgt)
+    _push(job_id, "Strapi installed ✓ — start with: npm run start (port 1337)")
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/admin/",
+            "note": "Runs on port 1337 — configure reverse proxy"}
+
+
+def _install_matomo(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["matomo"]
+    archive = _download_cached("matomo", url, filename, job_id)
+    ipath = cfg.get("install_path", "matomo").strip("/") or "matomo"
+    tgt = _target_dir(ipath)
+
+    _push(job_id, "Extracting Matomo…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["unzip", "-q", str(archive), "-d", tmp], check=True, timeout=120)
+        src = Path(tmp) / "matomo"
+        if not src.exists():
+            extracted = sorted(Path(tmp).iterdir())
+            src = extracted[0] if extracted and extracted[0].is_dir() else Path(tmp)
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    _set_permissions(tgt)
+    _push(job_id, "Matomo extracted ✓ — complete setup via browser install wizard")
+    return {"url": f"https://{DOMAIN}/{ipath}/index.php"}
+
+
+def _install_umami(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["umami"]
+    archive = _download_cached("umami", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Umami…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
+        extracted = sorted(Path(tmp).iterdir())[0]
+        for item in extracted.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    env_content = (
+        f"DATABASE_URL=mysql://{db_user}:{db_pass}@localhost:3306/{db_name}\n"
+        f"APP_SECRET={_rand_str(32)}\n"
+    )
+    (tgt / ".env").write_text(env_content)
+
+    _push(job_id, "Running npm install && npm run build for Umami…")
+    subprocess.run(["npm", "install"], cwd=str(tgt), capture_output=True, timeout=300, check=False)
+    subprocess.run(["npm", "run", "build"], cwd=str(tgt), capture_output=True, timeout=300, check=False)
+
+    _set_permissions(tgt)
+    _push(job_id, "Umami installed ✓ — start with: npm run start (port 3000)")
+    return {"url": f"https://{DOMAIN}", "note": "Runs on port 3000 — configure reverse proxy"}
+
+
+def _install_freshrss(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["freshrss"]
+    archive = _download_cached("freshrss", url, filename, job_id)
+    ipath = cfg.get("install_path", "freshrss").strip("/") or "freshrss"
+    tgt = _target_dir(ipath)
+
+    _push(job_id, "Extracting FreshRSS…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
+        extracted = sorted(Path(tmp).iterdir())[0]
+        for item in extracted.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    data_dir = tgt / "data"
+    data_dir.mkdir(exist_ok=True)
+    _set_permissions(tgt)
+    subprocess.run(["chmod", "-R", "777", str(data_dir)], check=False, timeout=30)
+    _push(job_id, "FreshRSS extracted ✓ — complete setup via browser installer")
+    return {"url": f"https://{DOMAIN}/{ipath}/"}
+
+
+def _install_nextcloud(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["nextcloud"]
+    archive = _download_cached("nextcloud", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Nextcloud (this may take a while)…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xjf", str(archive), "-C", tmp], check=True, timeout=300)
+        src = Path(tmp) / "nextcloud"
+        if not src.exists():
+            src = sorted(Path(tmp).iterdir())[0]
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    _set_permissions(tgt)
+    _push(job_id, "Nextcloud extracted ✓ — complete setup via browser install wizard")
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/index.php/login"}
+
+
+def _install_bookstack(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["bookstack"]
+    archive = _download_cached("bookstack", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting BookStack…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
+        extracted = sorted(Path(tmp).iterdir())[0]
+        for item in extracted.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    import base64
+    app_key = "base64:" + base64.b64encode(_rand_str(32).encode()).decode()
+    env_content = (
+        f"APP_KEY={app_key}\n"
+        f"APP_URL=https://{DOMAIN}\n"
+        f"APP_LANG=en\n"
+        f"DB_HOST=localhost\n"
+        f"DB_DATABASE={db_name}\n"
+        f"DB_USERNAME={db_user}\n"
+        f"DB_PASSWORD={db_pass}\n"
+        f"MAIL_DRIVER=smtp\n"
+        f"MAIL_FROM=bookstack@{DOMAIN}\n"
+    )
+    (tgt / ".env").write_text(env_content)
+
+    _push(job_id, "Running composer install for BookStack…")
+    if shutil.which("composer"):
+        subprocess.run(["composer", "install", "--no-dev", "--no-interaction"],
+                       cwd=str(tgt), capture_output=True, timeout=300, check=False)
+
+    _push(job_id, "Running database migrations…")
+    artisan = tgt / "artisan"
+    if artisan.exists():
+        subprocess.run(["php", str(artisan), "migrate", "--force"],
+                       cwd=str(tgt), capture_output=True, timeout=120, check=False)
+
+    _set_permissions(tgt)
+    _push(job_id, "BookStack installed ✓ — default login: admin@admin.com / password")
+    return {"url": f"https://{DOMAIN}"}
+
+
+def _install_wikijs(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["wikijs"]
+    archive = _download_cached("wikijs", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Wiki.js…")
+    subprocess.run(["tar", "-xzf", str(archive), "-C", str(tgt)], check=True, timeout=120)
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    config_yaml = (
+        f"bindIP: 0.0.0.0\n"
+        f"port: 3000\n"
+        f"db:\n"
+        f"  type: mysql\n"
+        f"  host: localhost\n"
+        f"  port: 3306\n"
+        f"  user: {db_user}\n"
+        f"  pass: {db_pass}\n"
+        f"  db: {db_name}\n"
+        f"ssl: false\n"
+    )
+    (tgt / "config.yml").write_text(config_yaml)
+
+    _set_permissions(tgt)
+    _push(job_id, "Wiki.js installed ✓ — start with: node server (port 3000)")
+    return {"url": f"https://{DOMAIN}", "note": "Runs on port 3000 — configure reverse proxy"}
+
+
+def _install_gitea(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["gitea"]
+    archive = _download_cached("gitea", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Installing Gitea binary…")
+    gitea_bin = tgt / "gitea"
+    shutil.copy2(str(archive), str(gitea_bin))
+    gitea_bin.chmod(0o755)
+
+    data_dir = Path("/var/customer/private/gitea")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    conf_dir = data_dir / "conf"
+    conf_dir.mkdir(exist_ok=True)
+
+    app_ini = (
+        f"[DEFAULT]\n"
+        f"RUN_USER = www-data\n\n"
+        f"[server]\n"
+        f"HTTP_ADDR = 0.0.0.0\n"
+        f"HTTP_PORT = 3000\n"
+        f"ROOT_URL  = https://{DOMAIN}/\n\n"
+        f"[database]\n"
+        f"DB_TYPE  = sqlite3\n"
+        f"PATH     = {data_dir}/gitea.db\n\n"
+        f"[repository]\n"
+        f"ROOT = {data_dir}/repositories\n\n"
+        f"[security]\n"
+        f"SECRET_KEY     = {_rand_str(40)}\n"
+        f"INTERNAL_TOKEN = {_rand_str(40)}\n"
+    )
+    (conf_dir / "app.ini").write_text(app_ini)
+
+    _set_permissions(tgt)
+    subprocess.run(["chown", "-R", "www-data:www-data", str(data_dir)], check=False, timeout=30)
+    _push(job_id, "Gitea installed ✓ — start with: ./gitea web --config /var/customer/private/gitea/conf/app.ini (port 3000)")
+    return {"url": f"https://{DOMAIN}", "note": "Runs on port 3000 — configure reverse proxy"}
+
+
+def _install_codeserver(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["codeserver"]
+    archive = _download_cached("codeserver", url, filename, job_id)
+
+    _push(job_id, "Extracting code-server…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=300)
+        extracted = sorted(Path(tmp).iterdir())[0]  # code-server-4.x.y-linux-amd64/
+        bin_src = extracted / "bin" / "code-server"
+        if bin_src.exists():
+            dest_bin = Path("/usr/local/bin/code-server")
+            shutil.copy2(str(bin_src), str(dest_bin))
+            dest_bin.chmod(0o755)
+            _push(job_id, "code-server binary installed to /usr/local/bin/code-server")
+        else:
+            raise RuntimeError("code-server binary not found in archive")
+
+    admin_pass = cfg.get("admin_pass", _rand_str(16))
+    start_script = (
+        f"#!/usr/bin/env bash\n"
+        f"export PASSWORD='{admin_pass}'\n"
+        f"exec /usr/local/bin/code-server --bind-addr 0.0.0.0:8080 --auth password /var/www/html\n"
+    )
+    script_path = Path("/var/customer/private/code-server.sh")
+    script_path.write_text(start_script)
+    script_path.chmod(0o700)
+
+    _push(job_id, "code-server installed ✓ — run /var/customer/private/code-server.sh to start (port 8080)")
+    return {"url": f"https://{DOMAIN}",
+            "note": "Runs on port 8080 — configure reverse proxy. Start: /var/customer/private/code-server.sh"}
+
+
+def _install_n8n(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["n8n"]
+    archive = _download_cached("n8n", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting n8n…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
+        src = Path(tmp) / "package"
+        if not src.exists():
+            extracted = sorted(Path(tmp).iterdir())
+            src = extracted[0] if extracted else Path(tmp)
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    admin_user = cfg.get("admin_user", "admin")
+    admin_pass = cfg.get("admin_pass", _rand_str(16))
+    env_content = (
+        f"N8N_BASIC_AUTH_ACTIVE=true\n"
+        f"N8N_BASIC_AUTH_USER={admin_user}\n"
+        f"N8N_BASIC_AUTH_PASSWORD={admin_pass}\n"
+        f"DB_TYPE=sqlite\n"
+        f"DB_SQLITE_VACUUM_ON_STARTUP=true\n"
+        f"N8N_PORT=5678\n"
+        f"N8N_PROTOCOL=https\n"
+        f"N8N_HOST={DOMAIN}\n"
+        f"WEBHOOK_URL=https://{DOMAIN}/\n"
+    )
+    (tgt / ".env").write_text(env_content)
+
+    if shutil.which("node"):
+        _push(job_id, "Running npm install for n8n…")
+        subprocess.run(["npm", "install"], cwd=str(tgt),
+                       capture_output=True, timeout=300, check=False)
+
+    _set_permissions(tgt)
+    _push(job_id, "n8n installed ✓ — start with: node node_modules/n8n/bin/n8n start (port 5678)")
+    return {"url": f"https://{DOMAIN}", "note": "Runs on port 5678 — configure reverse proxy"}
+
+
+def _install_nodered(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["nodered"]
+    archive = _download_cached("nodered", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Node-RED…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
+        src = Path(tmp) / "package"
+        if not src.exists():
+            extracted = sorted(Path(tmp).iterdir())
+            src = extracted[0] if extracted else Path(tmp)
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    _push(job_id, "Running npm install for Node-RED…")
+    subprocess.run(["npm", "install"], cwd=str(tgt),
+                   capture_output=True, timeout=300, check=False)
+
+    admin_user = cfg.get("admin_user", "admin")
+    admin_pass = cfg.get("admin_pass", _rand_str(16))
+    # Use a sha256 hash for the Node-RED credentials (bcrypt preferred but may not be available)
+    import hashlib
+    pass_hash = hashlib.sha256(admin_pass.encode()).hexdigest()
+    settings_js = (
+        f"module.exports = {{\n"
+        f"    uiPort: 1880,\n"
+        f"    httpAdminRoot: '/admin',\n"
+        f"    httpNodeRoot: '/',\n"
+        f"    userDir: '/var/customer/private/nodered/',\n"
+        f"    adminAuth: {{\n"
+        f"        type: 'credentials',\n"
+        f"        users: [{{\n"
+        f"            username: '{admin_user}',\n"
+        f"            password: '{pass_hash}',\n"
+        f"            permissions: '*'\n"
+        f"        }}]\n"
+        f"    }},\n"
+        f"    logging: {{ console: {{ level: 'info', metrics: false, audit: false }} }}\n"
+        f"}};\n"
+    )
+    Path("/var/customer/private/nodered").mkdir(parents=True, exist_ok=True)
+    (tgt / "settings.js").write_text(settings_js)
+
+    _set_permissions(tgt)
+    _push(job_id, "Node-RED installed ✓ — start with: node red.js (port 1880)")
+    return {"url": f"https://{DOMAIN}", "note": "Runs on port 1880 — configure reverse proxy"}
+
+
+def _install_filebrowser(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["filebrowser"]
+    archive = _download_cached("filebrowser", url, filename, job_id)
+
+    _push(job_id, "Extracting File Browser binary…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+        bin_candidates = list(Path(tmp).glob("**/filebrowser"))
+        if not bin_candidates:
+            # Some releases use different name
+            bin_candidates = [p for p in Path(tmp).iterdir() if p.is_file() and p.stat().st_mode & 0o111]
+        if bin_candidates:
+            dest_bin = Path("/usr/local/bin/filebrowser")
+            shutil.copy2(str(bin_candidates[0]), str(dest_bin))
+            dest_bin.chmod(0o755)
+            _push(job_id, "filebrowser binary installed to /usr/local/bin/filebrowser")
+        else:
+            raise RuntimeError("filebrowser binary not found in archive")
+
+    admin_user = cfg.get("admin_user", "admin")
+    admin_pass = cfg.get("admin_pass", _rand_str(16))
+    fb_config = {
+        "port": 8080,
+        "baseURL": "",
+        "address": "0.0.0.0",
+        "log": "stdout",
+        "database": "/var/customer/private/filebrowser.db",
+        "root": str(PUBLIC_ROOT),
+    }
+    config_path = Path("/var/customer/private/.filebrowser.json")
+    config_path.write_text(json.dumps(fb_config, indent=2))
+
+    _push(job_id, "File Browser installed ✓ — start: filebrowser -c /var/customer/private/.filebrowser.json (port 8080)")
+    return {"url": f"https://{DOMAIN}",
+            "note": f"Runs on port 8080. First run: filebrowser users add {admin_user} {admin_pass} --perm.admin"}
+
+
+def _install_uptime(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["uptime"]
+    archive = _download_cached("uptime", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Uptime Kuma…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
+        extracted = sorted(Path(tmp).iterdir())[0]  # uptime-kuma-1.x.y/
+        for item in extracted.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    _push(job_id, "Running npm install --production for Uptime Kuma…")
+    subprocess.run(["npm", "install", "--production"], cwd=str(tgt),
+                   capture_output=True, timeout=300, check=False)
+
+    _set_permissions(tgt)
+    _push(job_id, "Uptime Kuma installed ✓ — start with: node server/server.js (port 3001)")
+    return {"url": f"https://{DOMAIN}", "note": "Runs on port 3001 — configure reverse proxy"}
+
+
+def _install_vaultwarden(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["vaultwarden"]
+    archive = _download_cached("vaultwarden", url, filename, job_id)
+
+    _push(job_id, "Extracting Vaultwarden binary…")
+    data_dir = Path("/var/customer/private/vaultwarden")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+        bin_candidates = list(Path(tmp).glob("**/vaultwarden"))
+        if not bin_candidates:
+            bin_candidates = [p for p in Path(tmp).iterdir() if p.is_file() and p.stat().st_mode & 0o111]
+        if bin_candidates:
+            dest_bin = Path("/usr/local/bin/vaultwarden")
+            shutil.copy2(str(bin_candidates[0]), str(dest_bin))
+            dest_bin.chmod(0o755)
+            _push(job_id, "vaultwarden binary installed to /usr/local/bin/vaultwarden")
+        else:
+            raise RuntimeError("vaultwarden binary not found in archive")
+
+    admin_token = _rand_str(40)
+    env_content = (
+        f"DATA_FOLDER={data_dir}\n"
+        f"DATABASE_URL={data_dir}/db.sqlite3\n"
+        f"ROCKET_ADDRESS=0.0.0.0\n"
+        f"ROCKET_PORT=8000\n"
+        f"DOMAIN=https://{DOMAIN}\n"
+        f"ADMIN_TOKEN={admin_token}\n"
+        f"SIGNUPS_ALLOWED=true\n"
+        f"INVITATIONS_ALLOWED=true\n"
+    )
+    env_file = data_dir / ".env"
+    env_file.write_text(env_content)
+
+    subprocess.run(["chown", "-R", "www-data:www-data", str(data_dir)], check=False, timeout=30)
+    _push(job_id, f"Vaultwarden installed ✓ — start: vaultwarden (port 8000). Admin token: {admin_token}")
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/admin/",
+            "admin_token": admin_token,
+            "note": f"Runs on port 8000 — configure reverse proxy. SAVE admin token: {admin_token}"}
+
+
+def _install_invoiceninja(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["invoiceninja"]
+    archive = _download_cached("invoiceninja", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+
+    _push(job_id, "Extracting Invoice Ninja…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["unzip", "-q", str(archive), "-d", tmp], check=True, timeout=120)
+        extracted = sorted(Path(tmp).iterdir())
+        src = extracted[0] if extracted and extracted[0].is_dir() else Path(tmp)
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"Database creation failed: {err}")
+
+    import base64
+    app_key = "base64:" + base64.b64encode(_rand_str(32).encode()).decode()
+    env_content = (
+        f"APP_NAME='Invoice Ninja'\n"
+        f"APP_ENV=production\n"
+        f"APP_KEY={app_key}\n"
+        f"APP_DEBUG=false\n"
+        f"APP_URL=https://{DOMAIN}\n"
+        f"DB_HOST=localhost\n"
+        f"DB_DATABASE={db_name}\n"
+        f"DB_USERNAME={db_user}\n"
+        f"DB_PASSWORD={db_pass}\n"
+        f"REQUIRE_HTTPS=true\n"
+    )
+    (tgt / ".env").write_text(env_content)
+
+    _push(job_id, "Running artisan key:generate & migrations…")
+    artisan = tgt / "artisan"
+    if artisan.exists():
+        subprocess.run(["php", str(artisan), "key:generate", "--force"],
+                       cwd=str(tgt), capture_output=True, timeout=60, check=False)
+        subprocess.run(["php", str(artisan), "migrate", "--force"],
+                       cwd=str(tgt), capture_output=True, timeout=120, check=False)
+        subprocess.run(["php", str(artisan), "storage:link"],
+                       cwd=str(tgt), capture_output=True, timeout=30, check=False)
+
+    _set_permissions(tgt)
+    _push(job_id, "Invoice Ninja installed ✓ — visit the site URL to complete setup")
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/setup"}
+
+
+def _install_prestashop(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["prestashop"]
+    archive = _download_cached("prestashop", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+    _push(job_id, "Extracting PrestaShop…")
+    subprocess.run(["unzip", "-q", str(archive), "-d", str(tgt)], check=True, timeout=120)
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"DB creation failed: {err}")
+    _set_permissions(tgt)
+    _push(job_id, "PrestaShop extracted ✓ — complete the web installer to finish setup")
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/admin/", "note": "Delete the /install directory after setup is complete."}
+
+
+def _install_opencart(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["opencart"]
+    archive = _download_cached("opencart", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+    _push(job_id, "Extracting OpenCart…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+        upload_dir = Path(tmp) / "upload"
+        src = upload_dir if upload_dir.exists() else Path(tmp) / sorted(Path(tmp).iterdir())[0]
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"DB creation failed: {err}")
+    _set_permissions(tgt)
+    _push(job_id, "OpenCart extracted ✓ — visit install/ directory to complete setup")
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/admin/"}
+
+
+def _install_woocommerce(cfg: dict, job_id: str) -> dict:
+    """Install WordPress + WooCommerce plugin."""
+    # First install WordPress
+    _push(job_id, "Installing WordPress as WooCommerce base…")
+    result = _install_wordpress(cfg, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+    # Download and install WooCommerce plugin
+    _push(job_id, "Downloading WooCommerce plugin…")
+    woo_url = "https://downloads.wordpress.org/plugin/woocommerce.8.7.0.zip"
+    woo_archive = _download_cached("woocommerce-plugin", woo_url, "woocommerce-plugin.zip", job_id)
+    plugins_dir = tgt / "wp-content" / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["unzip", "-q", str(woo_archive), "-d", str(plugins_dir)], check=True, timeout=60)
+    _push(job_id, "WooCommerce plugin installed ✓ — activate it in WordPress admin")
+    result["note"] = "Go to Plugins in WordPress admin and activate WooCommerce to complete setup."
+    return result
+
+
+def _install_piwigo(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["piwigo"]
+    archive = _download_cached("piwigo", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+    _push(job_id, "Extracting Piwigo…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["unzip", "-q", str(archive), "-d", tmp], check=True, timeout=60)
+        src_candidates = [d for d in Path(tmp).iterdir() if d.is_dir()]
+        src = src_candidates[0] if src_candidates else Path(tmp)
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"DB creation failed: {err}")
+    _set_permissions(tgt)
+    _push(job_id, "Piwigo extracted ✓ — complete setup via web installer")
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/admin/"}
+
+
+def _install_lychee(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["lychee"]
+    archive = _download_cached("lychee", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+    _push(job_id, "Extracting Lychee…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["unzip", "-q", str(archive), "-d", tmp], check=True, timeout=60)
+        src_candidates = [d for d in Path(tmp).iterdir() if d.is_dir()]
+        src = src_candidates[0] if src_candidates else Path(tmp)
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"DB creation failed: {err}")
+    _push(job_id, "Writing .env…")
+    env_content = (
+        f"APP_ENV=production\nAPP_KEY=base64:{_rand_str(32)}\nAPP_DEBUG=false\n"
+        f"APP_URL=https://{DOMAIN}\nDB_CONNECTION=mysql\nDB_HOST=127.0.0.1\n"
+        f"DB_PORT=3306\nDB_DATABASE={db_name}\nDB_USERNAME={db_user}\nDB_PASSWORD={db_pass}\n"
+    )
+    (tgt / ".env").write_text(env_content)
+    _set_permissions(tgt)
+    _push(job_id, "Lychee installed ✓")
+    return {"url": f"https://{DOMAIN}"}
+
+
+def _install_jellyfin(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["jellyfin"]
+    archive = _download_cached("jellyfin", url, filename, job_id)
+    _push(job_id, "Extracting Jellyfin binary…")
+    data_dir = Path("/var/customer/private/jellyfin")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+        extracted = sorted(Path(tmp).iterdir())[0]
+        for item in extracted.iterdir():
+            dst = data_dir / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+    jellyfin_bin = data_dir / "jellyfin"
+    if jellyfin_bin.exists():
+        jellyfin_bin.chmod(0o755)
+    _push(job_id, "Jellyfin installed ✓ — runs on port 8096")
+    return {"url": f"https://{DOMAIN}:8096", "note": "Start with: /var/customer/private/jellyfin/jellyfin"}
+
+
+def _install_moodle(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["moodle"]
+    archive = _download_cached("moodle", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+    _push(job_id, "Extracting Moodle…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
+        src_candidates = [d for d in Path(tmp).iterdir() if d.is_dir()]
+        src = src_candidates[0] if src_candidates else Path(tmp)
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"DB creation failed: {err}")
+    moodle_data = Path("/var/customer/private/moodledata")
+    moodle_data.mkdir(parents=True, exist_ok=True)
+    _set_permissions(tgt)
+    subprocess.run(["chown", "-R", "www-data:www-data", str(moodle_data)], timeout=10, check=False)
+    _push(job_id, "Moodle extracted ✓ — visit the site to complete the installer")
+    return {"url": f"https://{DOMAIN}"}
+
+
+def _install_monica(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["monica"]
+    archive = _download_cached("monica", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+    _push(job_id, "Extracting Monica…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+        src = sorted(Path(tmp).iterdir())[0]
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"DB creation failed: {err}")
+    _push(job_id, "Writing .env…")
+    env_content = (
+        f"APP_ENV=production\nAPP_KEY=base64:{_rand_str(32)}\nAPP_DEBUG=false\n"
+        f"APP_URL=https://{DOMAIN}\nDB_CONNECTION=mysql\nDB_HOST=127.0.0.1\n"
+        f"DB_PORT=3306\nDB_DATABASE={db_name}\nDB_USERNAME={db_user}\nDB_PASSWORD={db_pass}\n"
+        f"MAIL_MAILER=smtp\nMAIL_HOST=localhost\nMAIL_PORT=587\n"
+        f"HASH_ROUNDS=14\n"
+    )
+    (tgt / ".env").write_text(env_content)
+    _set_permissions(tgt)
+    _push(job_id, "Running Monica migrations…")
+    php = shutil.which("php")
+    if php:
+        subprocess.run([php, str(tgt / "artisan"), "migrate", "--force"], cwd=str(tgt), timeout=120, check=False)
+        subprocess.run([php, str(tgt / "artisan"), "storage:link"], cwd=str(tgt), timeout=30, check=False)
+    return {"url": f"https://{DOMAIN}"}
+
+
+def _install_yourls(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["yourls"]
+    archive = _download_cached("yourls", url, filename, job_id)
+    tgt = _target_dir(cfg.get("install_path", "/"))
+    _push(job_id, "Extracting YOURLS…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["unzip", "-q", str(archive), "-d", tmp], check=True, timeout=60)
+        src = sorted(Path(tmp).iterdir())[0]
+        for item in src.iterdir():
+            dst = tgt / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"DB creation failed: {err}")
+    cfg_sample = tgt / "user" / "config-sample.php"
+    cfg_dest   = tgt / "user" / "config.php"
+    if cfg_sample.exists():
+        content = cfg_sample.read_text()
+        for old, new in [
+            ("'YOURLS_DB_USER', 'your db user name'", f"'YOURLS_DB_USER', '{db_user}'"),
+            ("'YOURLS_DB_PASS', 'your db password'",  f"'YOURLS_DB_PASS', '{db_pass}'"),
+            ("'YOURLS_DB_NAME', 'yourls'",             f"'YOURLS_DB_NAME', '{db_name}'"),
+            ("'YOURLS_SITE', 'http://your-own-domain-here.com'", f"'YOURLS_SITE', 'https://{DOMAIN}'"),
+            ("'YOURLS_USER', 'username'",              f"'YOURLS_USER', '{cfg.get('admin_user','admin')}'"),
+            ("'YOURLS_PASS', 'password'",              f"'YOURLS_PASS', '{cfg.get('admin_pass',_rand_str(16))}'"),
+        ]:
+            content = content.replace(old, new)
+        cfg_dest.write_text(content)
+    _set_permissions(tgt)
+    _push(job_id, "YOURLS configured ✓ — visit /admin/ to complete install")
+    return {"url": f"https://{DOMAIN}", "admin_url": f"https://{DOMAIN}/admin/"}
+
+
+def _install_grafana(cfg: dict, job_id: str) -> dict:
+    url, filename = APP_DOWNLOADS["grafana"]
+    archive = _download_cached("grafana", url, filename, job_id)
+    data_dir = Path("/var/customer/private/grafana")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _push(job_id, "Extracting Grafana…")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+        src = sorted(Path(tmp).iterdir())[0]
+        for item in src.iterdir():
+            dst = data_dir / item.name
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            (shutil.copytree if item.is_dir() else shutil.copy2)(str(item), str(dst))
+    grafana_bin = data_dir / "bin" / "grafana"
+    if grafana_bin.exists():
+        grafana_bin.chmod(0o755)
+    _push(job_id, "Grafana installed ✓ — runs on port 3000")
+    return {"url": f"http://{DOMAIN}:3000", "note": "Start with: /var/customer/private/grafana/bin/grafana server --homepath /var/customer/private/grafana"}
+
+
+def _install_netdata(cfg: dict, job_id: str) -> dict:
+    _push(job_id, "Installing Netdata via kickstart script…")
+    r = subprocess.run(
+        ["bash", "-c", "curl -Ss https://get.netdata.cloud/kickstart.sh | bash /dev/stdin --non-interactive --dont-start-it --disable-cloud"],
+        capture_output=True, text=True, timeout=300, check=False,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"Netdata install failed: {r.stderr[:500]}")
+    _push(job_id, "Netdata installed ✓ — runs on port 19999")
+    return {"url": f"http://{DOMAIN}:19999", "note": "Start with: systemctl start netdata"}
+
+
+def _install_zabbix(cfg: dict, job_id: str) -> dict:
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    _push(job_id, f"Creating Zabbix database `{db_name}`…")
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"DB creation failed: {err}")
+    _push(job_id, "Installing Zabbix via apt…")
+    subprocess.run(["bash", "-c",
+        "wget -q https://repo.zabbix.com/zabbix/6.4/debian/pool/main/z/zabbix-release/zabbix-release_6.4-1+debian12_all.deb -O /tmp/zabbix.deb && dpkg -i /tmp/zabbix.deb && apt-get update -q && apt-get install -y -q zabbix-server-mysql zabbix-frontend-php zabbix-apache-conf zabbix-sql-scripts"
+    ], capture_output=True, timeout=300, check=False)
+    _push(job_id, "Zabbix installed ✓ — configure /etc/zabbix/zabbix_server.conf and start services")
+    return {"url": f"https://{DOMAIN}/zabbix", "note": f"DB: {db_name}, user: {db_user}"}
+
+
+def _install_paperless(cfg: dict, job_id: str) -> dict:
+    _push(job_id, "Installing Paperless-ngx via pip…")
+    install_dir = Path("/var/customer/private/paperless")
+    install_dir.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(
+        ["pip3", "install", "--quiet", "paperless-ngx"],
+        capture_output=True, text=True, timeout=300, check=False,
+    )
+    if r.returncode != 0:
+        _push(job_id, f"pip install failed, trying alternative…")
+    db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
+    ok, err = _create_db(db_name, db_user, db_pass)
+    if not ok:
+        raise RuntimeError(f"DB creation failed: {err}")
+    env_content = (
+        f"PAPERLESS_SECRET_KEY={_rand_str(50)}\n"
+        f"PAPERLESS_URL=https://{DOMAIN}\n"
+        f"PAPERLESS_DBENGINE=mariadb\n"
+        f"PAPERLESS_DBHOST=127.0.0.1\n"
+        f"PAPERLESS_DBNAME={db_name}\n"
+        f"PAPERLESS_DBUSER={db_user}\n"
+        f"PAPERLESS_DBPASS={db_pass}\n"
+        f"PAPERLESS_MEDIA_ROOT=/var/customer/private/paperless/media\n"
+        f"PAPERLESS_DATA_DIR=/var/customer/private/paperless/data\n"
+    )
+    (install_dir / ".env").write_text(env_content)
+    _push(job_id, "Paperless-ngx configured ✓")
+    return {"url": f"https://{DOMAIN}", "note": "Run: python manage.py migrate && python manage.py createsuperuser"}
+
+
+_INSTALLERS = {
+    "wordpress":  _install_wordpress,
+    "joomla":     _install_joomla,
+    "drupal":     _install_drupal,
+    "grav":       _install_grav,
+    "roundcube":  _install_roundcube,
+    "snappymail": _install_snappymail,
+    "phpmyadmin": _install_phpmyadmin,
+    "adminer":    _install_adminer,
+    "ghost":        _install_ghost,
+    "october":      _install_october,
+    "concrete":     _install_concrete,
+    "typo3":        _install_typo3,
+    "strapi":       _install_strapi,
+    "matomo":       _install_matomo,
+    "umami":        _install_umami,
+    "freshrss":     _install_freshrss,
+    "nextcloud":    _install_nextcloud,
+    "bookstack":    _install_bookstack,
+    "wikijs":       _install_wikijs,
+    "gitea":        _install_gitea,
+    "codeserver":   _install_codeserver,
+    "n8n":          _install_n8n,
+    "nodered":      _install_nodered,
+    "filebrowser":  _install_filebrowser,
+    "uptime":       _install_uptime,
+    "vaultwarden":  _install_vaultwarden,
+    "invoiceninja": _install_invoiceninja,
+}
+
+
+def _run_install(job_id: str, app_id: str, cfg: dict):
+    try:
+        fn = _INSTALLERS[app_id]
+        result = fn(cfg, job_id)
+        _install_jobs[job_id]["status"] = "done"
+        _install_jobs[job_id]["result"] = result
+        _record_installed(app_id, result)
+    except Exception as exc:
+        log.exception("Install failed for %s", app_id)
+        _install_jobs[job_id]["status"] = "error"
+        _install_jobs[job_id]["error"] = str(exc)
+
+
+# ── Install API ───────────────────────────────────────────────────────────────
+
+@app.get("/install/apps")
+def install_list_apps():
+    _verify_token()
+    return jsonify({k: {"name": k} for k in _INSTALLERS})
+
+
+@app.get("/install/list")
+def install_list_installed():
+    _verify_token()
+    if not INSTALLED_APPS_FILE.exists():
+        return jsonify({"apps": []})
+    try:
+        return jsonify(json.loads(INSTALLED_APPS_FILE.read_text()))
+    except Exception:
+        return jsonify({"apps": []})
+
+
+@app.post("/install")
+def install_app():
+    _verify_token()
+    body   = request.json or {}
+    app_id = body.get("app_id", "")
+    cfg    = body.get("config", {})
+
+    if app_id not in _INSTALLERS:
+        abort(400)
+
+    job_id = secrets.token_hex(8)
+    _install_jobs[job_id] = {
+        "status": "running",
+        "messages": [f"Starting installation of {app_id}…"],
+        "error": None,
+        "result": None,
+    }
+    threading.Thread(target=_run_install, args=(job_id, app_id, cfg), daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.get("/install/status/<job_id>")
+def install_job_status(job_id):
+    _verify_token()
+    job = _install_jobs.get(job_id)
+    if not job:
+        abort(404)
+    return jsonify(job)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── SFTP (SSH-based, key-pair, chrooted to webroot) ───────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Creates an OS user `sftp_<domain>` locked to SFTP-only (no shell),
+# chrooted to /var/www/html.  Uses Ed25519 key pair; private key is returned
+# once and stored nowhere accessible to the customer (only root can read it
+# until they download it).
+
+SFTP_USER       = f"sftp_{re.sub(r'[^a-z0-9]', '_', DOMAIN.lower())[:24]}"
+SFTP_KEY_DIR    = DB_DIR / "sftp"
+SFTP_INFO_FILE  = SFTP_KEY_DIR / "info.json"
+
+
+def _sftp_user_exists() -> bool:
+    r = subprocess.run(["id", SFTP_USER], capture_output=True)
+    return r.returncode == 0
+
+
+@app.post("/sftp/create")
+def sftp_create():
+    """
+    Create (or rotate) SFTP credentials for this container's domain.
+    Returns the Ed25519 private key (PEM) — only time it is readable.
+    """
+    _verify_token()
+    SFTP_KEY_DIR.mkdir(parents=True, exist_ok=True)
+
+    priv_key = SFTP_KEY_DIR / "id_ed25519"
+    pub_key  = SFTP_KEY_DIR / "id_ed25519.pub"
+
+    # Remove old keys if rotating
+    priv_key.unlink(missing_ok=True)
+    pub_key.unlink(missing_ok=True)
+
+    # Generate Ed25519 key pair (no passphrase — panel manages access)
+    subprocess.run(
+        ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", f"sftp@{DOMAIN}", "-f", str(priv_key)],
+        check=True, timeout=15,
+    )
+    priv_key.chmod(0o600)
+    pub_key.chmod(0o644)
+
+    # Create OS user if absent, locked, no shell
+    if not _sftp_user_exists():
+        subprocess.run(
+            ["useradd", "-M", "-s", "/usr/lib/openssh/sftp-server",
+             "-d", str(PUBLIC_ROOT), SFTP_USER],
+            check=True, timeout=10,
+        )
+        subprocess.run(["passwd", "-l", SFTP_USER], check=True, timeout=5)
+
+    # Install authorised key
+    auth_keys_dir = Path(f"/home/{SFTP_USER}/.ssh")
+    auth_keys_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(pub_key), str(auth_keys_dir / "authorized_keys"))
+    subprocess.run(["chown", "-R", f"{SFTP_USER}:{SFTP_USER}", str(auth_keys_dir)], check=True)
+    subprocess.run(["chmod", "700", str(auth_keys_dir)], check=True)
+    subprocess.run(["chmod", "600", str(auth_keys_dir / "authorized_keys")], check=True)
+
+    # Chroot requires root-owned target dir
+    subprocess.run(["chown", "root:root", str(PUBLIC_ROOT)], check=True)
+    subprocess.run(["chmod", "755", str(PUBLIC_ROOT)], check=True)
+
+    # Determine the SSH port exposed to the outside world
+    ssh_port_file = DB_DIR / "ssh_port.txt"
+    ext_port = ssh_port_file.read_text().strip() if ssh_port_file.exists() else "22"
+
+    info = {
+        "user":     SFTP_USER,
+        "host":     DOMAIN,
+        "port":     ext_port,
+        "key_type": "ed25519",
+        "webroot":  str(PUBLIC_ROOT),
+        "created":  int(time.time()),
+    }
+    SFTP_INFO_FILE.write_text(json.dumps(info))
+
+    return jsonify({
+        "ok":          True,
+        "private_key": priv_key.read_text(),  # returned once — customer must save it
+        "info":        info,
+    })
+
+
+@app.get("/sftp/info")
+def sftp_info():
+    """Return current SFTP connection info (no private key)."""
+    _verify_token()
+    if not SFTP_INFO_FILE.exists():
+        return jsonify({"configured": False})
+    data = json.loads(SFTP_INFO_FILE.read_text())
+    return jsonify({"configured": True, **data})
+
+
+@app.delete("/sftp/revoke")
+def sftp_revoke():
+    """Remove SFTP access — deletes OS user and keys."""
+    _verify_token()
+    if _sftp_user_exists():
+        subprocess.run(["userdel", "-r", SFTP_USER], check=False, timeout=10)
+    for f in [SFTP_KEY_DIR / "id_ed25519", SFTP_KEY_DIR / "id_ed25519.pub", SFTP_INFO_FILE]:
+        f.unlink(missing_ok=True)
+    return jsonify({"ok": True})
+
+
 if __name__ == "__main__":
     if not API_TOKEN:
         log.error("FATAL: CONTAINER_API_TOKEN must be set in production. Refusing to start without token.")
         # Still start in dev — but print loud warning
     log.info("Container API starting for domain: %s", DOMAIN)
-    app.run(host=LISTEN_HOST, port=9000, debug=False, threaded=True)
+
+    # Load TLS cert if available — encrypts all panel ↔ container-API traffic
+    cert = Path("/var/db/api_cert.pem")
+    key  = Path("/var/db/api_key.pem")
+    if cert.exists() and key.exists():
+        log.info("TLS enabled: using %s", cert)
+        ssl_ctx = (str(cert), str(key))
+    else:
+        log.warning("TLS cert not found — running unencrypted (dev mode only)")
+        ssl_ctx = None
+
+    app.run(host=LISTEN_HOST, port=9000, debug=False, threaded=True,
+            ssl_context=ssl_ctx)
