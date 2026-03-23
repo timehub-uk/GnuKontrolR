@@ -1,9 +1,31 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # GnuKontrolR — Installer
-# Usage: curl -sSL https://raw.githubusercontent.com/timehub-uk/GnuKontrolR/master/install.sh | bash
-#   or:  bash install.sh
+# Usage: curl -sSL https://raw.githubusercontent.com/timehub-uk/GnuKontrolR/master/install.sh | sudo bash
+#   or:  sudo bash install.sh
 # ─────────────────────────────────────────────────────────────────────────────
+
+INSTALL_DIR="${INSTALL_DIR:-/opt/gnukontrolr}"
+REPO_URL="https://github.com/timehub-uk/GnuKontrolR.git"
+
+# ─── Bootstrap: if not running from inside the install dir, clone first ──────
+# When piped from curl, $0 is "bash" — not a path to a file in the repo.
+if [[ "$0" != "$INSTALL_DIR/install.sh" ]]; then
+  [[ $EUID -eq 0 ]] || { echo "Run as root: curl ... | sudo bash"; exit 1; }
+  command -v git  &>/dev/null || { apt-get update -qq && apt-get install -y -qq git; }
+  command -v curl &>/dev/null || { apt-get update -qq && apt-get install -y -qq curl; }
+  if [[ -d "$INSTALL_DIR/.git" ]]; then
+    echo "Updating existing install at $INSTALL_DIR..."
+    git -C "$INSTALL_DIR" pull --ff-only
+  else
+    echo "Cloning GnuKontrolR to $INSTALL_DIR..."
+    mkdir -p "$(dirname "$INSTALL_DIR")"
+    git clone "$REPO_URL" "$INSTALL_DIR"
+  fi
+  exec bash "$INSTALL_DIR/install.sh"
+fi
+
+# ─── Running from inside the repo — safe to enable strict mode ───────────────
 set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -14,16 +36,8 @@ warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 die()     { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 header()  { echo -e "\n${BOLD}${CYAN}▶ $*${NC}"; }
 
-INSTALL_DIR="${INSTALL_DIR:-/opt/gnukontrolr}"
-REPO_URL="https://github.com/timehub-uk/GnuKontrolR.git"
 MIN_DOCKER="24.0"
 MIN_COMPOSE="2.20"
-
-# When piped from curl, BASH_SOURCE[0] is not a file — detect this so we can
-# clone the repo and re-exec the real install.sh from inside it.
-RUNNING_FROM_CURL=false
-_src="${BASH_SOURCE[0]:-}"
-[[ -z "$_src" || "$_src" == "/dev/stdin" || "$_src" == "bash" || ! -f "$_src" ]] && RUNNING_FROM_CURL=true
 
 # ─── Banner ───────────────────────────────────────────────────────────────────
 echo -e "${BOLD}"
@@ -40,26 +54,6 @@ echo -e "${NC}"
 
 # ─── Root check ──────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "Run as root: sudo bash install.sh"
-
-# ─── If piped from curl: clone first, then re-exec the real install.sh ───────
-if $RUNNING_FROM_CURL; then
-  header "Bootstrapping from curl"
-  need_curl() { command -v curl &>/dev/null || { apt-get update -qq && apt-get install -y -qq curl; }; }
-  need_git()  { command -v git  &>/dev/null || { apt-get update -qq && apt-get install -y -qq git;  }; }
-  need_curl; need_git
-
-  if [[ -d "$INSTALL_DIR/.git" ]]; then
-    info "Updating existing install at $INSTALL_DIR..."
-    git -C "$INSTALL_DIR" pull --ff-only
-  else
-    info "Cloning GnuKontrolR to $INSTALL_DIR..."
-    mkdir -p "$(dirname "$INSTALL_DIR")"
-    git clone "$REPO_URL" "$INSTALL_DIR"
-  fi
-  ok "Repository ready"
-  info "Re-running installer from $INSTALL_DIR/install.sh..."
-  exec bash "$INSTALL_DIR/install.sh"
-fi
 
 # ─── OS check ────────────────────────────────────────────────────────────────
 header "Checking system"
