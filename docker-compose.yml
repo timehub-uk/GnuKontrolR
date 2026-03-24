@@ -145,8 +145,8 @@ services:
   # ── WebPanel API ───────────────────────────────────────────────────────────
   webpanel:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: webpanel_api
     restart: unless-stopped
     networks:

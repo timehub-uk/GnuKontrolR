@@ -1,7 +1,19 @@
 # ── GnuKontrolR Panel API ────────────────────────────────────────────────────
-# Multi-stage build: compile deps in builder, copy to slim runtime image.
+# Multi-stage build:
+#   frontend-builder  — Node 20, builds React SPA → /frontend/dist
+#   py-builder        — compiles Python wheels
+#   runtime           — slim image with both outputs baked in
 
-# ── Stage 1: dependency builder ──────────────────────────────────────────────
+# ── Stage 1: React frontend build ────────────────────────────────────────────
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci --silent
+COPY frontend/ ./
+RUN npm run build
+
+# ── Stage 2: Python dependency builder ───────────────────────────────────────
 FROM python:3.12-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -10,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 
@@ -38,7 +50,10 @@ COPY --from=builder /install /usr/local
 WORKDIR /app
 
 # Copy application source
-COPY app/ ./app/
+COPY backend/app/ ./app/
+
+# Copy built React frontend (from frontend-builder stage)
+COPY --from=frontend-builder /frontend/dist ./frontend/dist/
 
 # Persistent data directory (SQLite DB lives here — mount a volume at /app/data)
 RUN mkdir -p /app/data && chown panelapi:panelapi /app/data

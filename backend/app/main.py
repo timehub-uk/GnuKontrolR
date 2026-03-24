@@ -146,7 +146,7 @@ async def prometheus_metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 # Serve built React frontend in production
-STATIC_DIR = Path(__file__).parent.parent.parent / "frontend" / "dist"
+STATIC_DIR = Path(__file__).parent.parent / "frontend" / "dist"
 if STATIC_DIR.exists():
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
