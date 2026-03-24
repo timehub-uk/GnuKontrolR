@@ -4,29 +4,81 @@
 
 @layer base {
   * { box-sizing: border-box; }
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: #111827; }
-  ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+  html { background: #070709; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: #0c0c0f; }
+  ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
 }
 
 @layer components {
+  /* ── Cards / Panels ───────────────────────────────────────────────────────── */
   .card {
-    @apply bg-panel-800 border border-panel-600 rounded-xl p-5;
+    @apply bg-panel-card border border-panel-border rounded-xl p-5;
   }
+  .panel {
+    @apply bg-panel-card border border-panel-border rounded-xl;
+  }
+
+  /* ── Buttons ─────────────────────────────────────────────────────────────── */
   .btn-primary {
-    @apply bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 rounded-lg font-medium text-sm transition-colors disabled:opacity-50;
+    @apply bg-brand hover:bg-brand-dark text-white px-4 py-2 rounded-lg font-medium text-sm transition-colors duration-150 disabled:opacity-40 disabled:cursor-not-allowed;
   }
   .btn-ghost {
-    @apply bg-transparent hover:bg-panel-700 text-gray-300 px-4 py-2 rounded-lg text-sm transition-colors;
+    @apply bg-transparent hover:bg-panel-elevated text-ink-secondary hover:text-ink-primary border border-panel-border px-4 py-2 rounded-lg text-sm transition-colors duration-150;
   }
   .btn-danger {
-    @apply bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors;
+    @apply bg-bad/10 hover:bg-bad/20 text-bad-light border border-bad/20 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-150;
   }
+
+  /* ── Inputs ──────────────────────────────────────────────────────────────── */
   .input {
-    @apply bg-panel-700 border border-panel-600 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-brand-500 w-full;
+    @apply bg-panel-elevated border border-panel-border rounded-lg px-3 py-2 text-sm text-ink-primary placeholder-ink-muted
+           focus:outline-none focus:border-brand focus:ring-2 focus:ring-brand/20 w-full transition-colors duration-150;
   }
-  .badge-green  { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-900 text-green-300; }
-  .badge-red    { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-900 text-red-300; }
-  .badge-yellow { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-900 text-yellow-300; }
-  .badge-blue   { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-900 text-blue-300; }
+  .select {
+    @apply input appearance-none cursor-pointer;
+  }
+
+  /* ── Status pills ────────────────────────────────────────────────────────── */
+  .pill-green  {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-ok/10 text-ok-light border border-ok/20;
+  }
+  .pill-amber  {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-warn/10 text-warn-light border border-warn/20;
+  }
+  .pill-red    {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-bad/10 text-bad-light border border-bad/20;
+  }
+  .pill-indigo {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-brand/10 text-brand-light border border-brand/20;
+  }
+
+  /* ── Legacy badge aliases ────────────────────────────────────────────────── */
+  .badge-green  { @apply pill-green; }
+  .badge-red    { @apply pill-red; }
+  .badge-yellow { @apply pill-amber; }
+  .badge-blue   { @apply pill-indigo; }
+
+  /* ── Status dot ──────────────────────────────────────────────────────────── */
+  .dot-green { @apply w-1.5 h-1.5 rounded-full bg-ok flex-shrink-0; box-shadow: 0 0 5px rgba(16,185,129,0.8); }
+  .dot-amber { @apply w-1.5 h-1.5 rounded-full bg-warn flex-shrink-0; }
+  .dot-red   { @apply w-1.5 h-1.5 rounded-full bg-bad flex-shrink-0; }
+
+  /* ── Table ───────────────────────────────────────────────────────────────── */
+  .tbl-head {
+    @apply text-left text-xs font-semibold uppercase tracking-wider text-ink-muted px-4 py-3;
+  }
+  .tbl-cell {
+    @apply px-4 py-3 text-sm text-ink-secondary;
+  }
+  .tbl-row {
+    @apply border-b border-panel-subtle hover:bg-panel-elevated/50 transition-colors duration-150;
+  }
 }

@@ -153,6 +153,8 @@ services:
       - webpanel_net
     ports:
       - "8000:8000"
+    group_add:
+      - "${DOCKER_GID:-984}"   # match host docker socket GID so panelapi can talk to dockerd
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # manage customer containers
       - webpanel_sites:/var/webpanel/sites           # customer files

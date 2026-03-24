@@ -19,20 +19,45 @@ _pool = ThreadPoolExecutor(max_workers=4)
 
 def _collect_stats() -> dict:
     """Blocking stats collection — runs in thread pool."""
-    cpu  = psutil.cpu_percent(interval=0.5)
-    mem  = psutil.virtual_memory()
-    disk = psutil.disk_usage("/")
-    net  = psutil.net_io_counters()
+    cpu     = psutil.cpu_percent(interval=0.5)
+    cpu_per = psutil.cpu_percent(interval=None, percpu=True)
+    mem     = psutil.virtual_memory()
+    swap    = psutil.swap_memory()
+    disk    = psutil.disk_usage("/")
+    net     = psutil.net_io_counters()
+    load    = psutil.getloadavg()  # 1m, 5m, 15m
+
+    # Per-interface network (skip loopback)
+    net_if = {}
+    for iface, counters in psutil.net_io_counters(pernic=True).items():
+        if iface == "lo":
+            continue
+        net_if[iface] = {
+            "sent_mb": counters.bytes_sent // (1024 * 1024),
+            "recv_mb": counters.bytes_recv // (1024 * 1024),
+        }
+
     return {
         "cpu_percent":    cpu,
+        "cpu_per_core":   cpu_per,
+        "cpu_count":      len(cpu_per),
+        "load_1m":        round(load[0], 2),
+        "load_5m":        round(load[1], 2),
+        "load_15m":       round(load[2], 2),
         "mem_total_mb":   mem.total  // (1024 * 1024),
         "mem_used_mb":    mem.used   // (1024 * 1024),
+        "mem_available_mb": mem.available // (1024 * 1024),
         "mem_percent":    mem.percent,
+        "swap_total_mb":  swap.total // (1024 * 1024),
+        "swap_used_mb":   swap.used  // (1024 * 1024),
+        "swap_percent":   swap.percent,
         "disk_total_gb":  disk.total // (1024 ** 3),
         "disk_used_gb":   disk.used  // (1024 ** 3),
+        "disk_free_gb":   disk.free  // (1024 ** 3),
         "disk_percent":   disk.percent,
         "net_sent_mb":    net.bytes_sent // (1024 * 1024),
         "net_recv_mb":    net.bytes_recv // (1024 * 1024),
+        "net_interfaces": net_if,
         "boot_timestamp": int(psutil.boot_time()),
     }
 

@@ -4,17 +4,37 @@ import { useAuth } from '../context/AuthContext';
 import {
   LayoutDashboard, Globe, Users, Container, Server,
   FolderOpen, Database, Mail, ShieldCheck, ScrollText,
-  HardDrive, Terminal, Settings, LogOut, Menu, X,
-  Package, Eye, Activity, Shield, ChevronRight, Cpu, LayoutGrid,
+  HardDrive, Terminal, Settings, LogOut,
+  Package, Eye, Activity, Shield, ChevronRight, Cpu,
+  LayoutGrid, PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react';
 
-// ── Navigation definition — grouped with section headers ─────────────────────
+// ── Brand logo SVG ────────────────────────────────────────────────────────────
+function BrandIcon({ size = 26 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ flexShrink: 0 }}>
+      <defs>
+        <linearGradient id="bl" x1="0" y1="0" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#6366f1"/><stop offset="1" stopColor="#8b5cf6"/>
+        </linearGradient>
+      </defs>
+      <rect width="28" height="28" rx="7" fill="url(#bl)"/>
+      <rect x="6" y="8" width="16" height="4" rx="1.5" fill="white" fillOpacity="0.9"/>
+      <rect x="6" y="14" width="16" height="4" rx="1.5" fill="white" fillOpacity="0.55"/>
+      <circle cx="19" cy="10" r="1.5" fill="#4ade80"/>
+      <circle cx="19" cy="16" r="1.5" fill="white" fillOpacity="0.35"/>
+      <rect x="6" y="20" width="9" height="2" rx="1" fill="white" fillOpacity="0.25"/>
+    </svg>
+  );
+}
+
+// ── Navigation groups ─────────────────────────────────────────────────────────
 const NAV_GROUPS = [
   {
     label: 'Core',
     items: [
       { to: '/menu',     icon: LayoutGrid,      label: 'Main Menu'  },
-      { to: '/',         icon: LayoutDashboard, label: 'Dashboard'  },
+      { to: '/',         icon: LayoutDashboard, label: 'Dashboard', end: true },
       { to: '/domains',  icon: Globe,           label: 'Domains'    },
       { to: '/docker',   icon: Container,       label: 'Containers' },
     ],
@@ -42,8 +62,8 @@ const NAV_GROUPS = [
   {
     label: 'Security',
     items: [
-      { to: '/security',      icon: Shield,   label: 'Security'        },
-      { to: '/activity-log',  icon: Activity, label: 'Activity Log'    },
+      { to: '/security',      icon: Shield,   label: 'Security'      },
+      { to: '/activity-log',  icon: Activity, label: 'Activity Log'  },
       { to: '/admin-content', icon: Eye,      label: 'Content Viewer', adminOnly: true },
     ],
   },
@@ -56,134 +76,120 @@ const NAV_GROUPS = [
   },
 ];
 
-// Breadcrumb label map
 const ROUTE_LABELS = {
-  '/':             'Dashboard',
-  '/menu':         'Main Menu',
-  '/domains':      'Domains',
-  '/docker':       'Containers',
-  '/services':     'Master Services',
-  '/marketplace':  'Marketplace',
-  '/dns':          'DNS',
-  '/files':        'Files',
-  '/databases':    'Databases',
-  '/email':        'Email',
-  '/ssl':          'SSL / TLS',
-  '/backups':      'Backups',
-  '/logs':         'Logs',
-  '/terminal':     'Terminal',
-  '/security':     'Security',
-  '/activity-log': 'Activity Log',
-  '/admin-content':'Content Viewer',
-  '/users':        'Users',
-  '/settings':     'Settings',
+  '/': 'Dashboard', '/menu': 'Main Menu', '/domains': 'Domains',
+  '/docker': 'Containers', '/services': 'Master Services', '/marketplace': 'Marketplace',
+  '/dns': 'DNS', '/files': 'Files', '/databases': 'Databases', '/email': 'Email',
+  '/ssl': 'SSL / TLS', '/backups': 'Backups', '/logs': 'Logs', '/terminal': 'Terminal',
+  '/security': 'Security', '/activity-log': 'Activity Log', '/admin-content': 'Content Viewer',
+  '/users': 'Users', '/settings': 'Settings',
 };
 
-// ── NavItem — single link with tooltip when sidebar is collapsed ──────────────
-
-function NavItem({ to, icon: Icon, label, isOpen, end }) {
+// ── NavItem — full or icon-only ───────────────────────────────────────────────
+function NavItem({ to, icon: Icon, label, end, collapsed }) {
   return (
-    <div className="relative group/nav">
+    <div className="relative group/tip">
       <NavLink
         to={to}
         end={end}
         className={({ isActive }) =>
-          `flex items-center gap-3 px-3 py-2 mx-1 rounded-lg text-sm transition-colors ${
-            isActive
-              ? 'bg-brand-600/20 text-brand-300'
-              : 'text-gray-400 hover:text-white hover:bg-panel-700/70'
-          }`
+          `flex items-center gap-2.5 rounded-md text-[13px] font-medium
+           transition-colors duration-150 border-l-2
+           ${collapsed ? 'px-2 py-2 justify-center ml-0' : 'px-2.5 py-1.5 ml-[-2px]'}
+           ${isActive
+             ? 'border-brand text-brand-light bg-brand/10'
+             : 'border-transparent text-ink-muted hover:text-ink-secondary hover:bg-panel-elevated'
+           }`
         }
       >
         {({ isActive }) => (
           <>
-            <Icon size={15} className={`flex-shrink-0 ${isActive ? 'text-brand-400' : ''}`} />
-            {isOpen && <span className="truncate">{label}</span>}
+            <Icon size={15} className={`flex-shrink-0 ${isActive ? 'text-brand' : ''}`} />
+            {!collapsed && <span className="truncate">{label}</span>}
           </>
         )}
       </NavLink>
-
       {/* Tooltip when collapsed */}
-      {!isOpen && (
+      {collapsed && (
         <div className="
-          pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-2
-          bg-panel-700 border border-panel-500 text-white text-xs rounded-lg
-          px-2.5 py-1.5 whitespace-nowrap shadow-xl z-50
-          opacity-0 group-hover/nav:opacity-100 transition-opacity duration-150
+          pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-2 z-50
+          bg-panel-card border border-panel-subtle text-ink-primary text-xs
+          rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-xl
+          opacity-0 group-hover/tip:opacity-100 transition-opacity duration-150
         ">
           {label}
-          <div className="absolute right-full top-1/2 -translate-y-1/2 border-4 border-transparent border-r-panel-700" />
+          <div className="absolute right-full top-1/2 -translate-y-1/2 border-4 border-transparent border-r-panel-subtle" />
         </div>
       )}
     </div>
   );
 }
 
-// ── Main Layout ───────────────────────────────────────────────────────────────
-
+// ── Layout ────────────────────────────────────────────────────────────────────
 export default function Layout({ children }) {
   const { user, logout } = useAuth();
-  const navigate  = useNavigate();
-  const location  = useLocation();
-  const [open, setOpen] = useState(true);
+  const navigate   = useNavigate();
+  const location   = useLocation();
+  const [collapsed, setCollapsed] = useState(false);
 
-  const isAdmin = ['superadmin', 'admin'].includes(user?.role);
-
+  const isAdmin    = ['superadmin', 'admin'].includes(user?.role);
   const breadcrumb = ROUTE_LABELS[location.pathname] ?? 'GnuKontrolR';
+  const initial    = (user?.username?.[0] ?? '?').toUpperCase();
+
+  const roleColors = {
+    superadmin: 'bg-brand/15 text-brand-light border-brand/25',
+    admin:      'bg-violet/15 text-violet-light border-violet/25',
+    reseller:   'bg-warn/15 text-warn-light border-warn/25',
+    user:       'bg-panel-subtle text-ink-muted border-panel-subtle',
+  };
+  const roleColor = roleColors[user?.role] ?? roleColors.user;
 
   return (
-    <div className="flex min-h-screen bg-panel-900">
+    <div className="flex min-h-screen bg-panel-base">
 
-      {/* ── Sidebar ─────────────────────────────────────────────────────────── */}
-      <aside className={`
-        flex flex-col bg-panel-800 border-r border-panel-600
-        transition-all duration-200 flex-shrink-0
-        ${open ? 'w-52' : 'w-[52px]'}
-      `}>
-
-        {/* Brand */}
-        <div className="flex items-center gap-2.5 px-3 py-3.5 border-b border-panel-600">
-          <div className="w-7 h-7 bg-brand-600 rounded-lg flex items-center justify-center flex-shrink-0">
-            <Cpu size={13} className="text-white" />
-          </div>
-          {open && (
-            <span className="font-bold text-white text-sm tracking-wide truncate">
-              GnuKontrolR
-            </span>
+      {/* ── Sidebar ────────────────────────────────────────────────────────── */}
+      <aside
+        className="flex-shrink-0 flex flex-col bg-panel-surface border-r border-panel-subtle transition-all duration-200"
+        style={{ width: collapsed ? 52 : 220 }}
+      >
+        {/* Brand + collapse toggle */}
+        <div className={`flex items-center border-b border-panel-subtle h-12 px-3 flex-shrink-0 ${collapsed ? 'justify-center' : 'gap-2.5'}`}>
+          <BrandIcon size={26} />
+          {!collapsed && (
+            <span className="font-bold text-[13px] text-ink-primary tracking-tight flex-1 truncate">GnuKontrolR</span>
           )}
           <button
-            onClick={() => setOpen(o => !o)}
-            className="ml-auto text-gray-500 hover:text-white transition-colors flex-shrink-0"
-            title={open ? 'Collapse' : 'Expand'}
+            onClick={() => setCollapsed(c => !c)}
+            className={`text-ink-muted hover:text-ink-secondary transition-colors flex-shrink-0 ${collapsed ? 'mt-0' : 'ml-auto'}`}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           >
-            {open ? <X size={14} /> : <Menu size={14} />}
+            {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
           </button>
         </div>
 
-        {/* Nav groups */}
-        <nav className="flex-1 py-2 overflow-y-auto overflow-x-hidden space-y-0.5">
+        {/* Nav */}
+        <nav className={`flex-1 py-3 overflow-y-auto overflow-x-hidden space-y-0.5 ${collapsed ? 'px-1.5' : 'px-3'}`}>
           {NAV_GROUPS.map(group => {
             const visible = group.items.filter(i => !i.adminOnly || isAdmin);
             if (!visible.length) return null;
             return (
               <div key={group.label}>
-                {/* Section label — only shown when expanded */}
-                {open && (
-                  <p className="px-4 pt-3 pb-1 text-xs font-semibold uppercase tracking-widest text-gray-600 select-none">
+                {!collapsed ? (
+                  <p className="px-2.5 pt-3 pb-1.5 text-[10px] font-semibold uppercase tracking-widest text-ink-faint select-none">
                     {group.label}
                   </p>
+                ) : (
+                  <div className="my-2 border-t border-panel-subtle mx-1" />
                 )}
-                {/* Divider when collapsed */}
-                {!open && <div className="mx-3 my-2 border-t border-panel-700" />}
-
                 {visible.map(item => (
                   <NavItem
                     key={item.to}
                     to={item.to}
                     icon={item.icon}
                     label={item.label}
-                    isOpen={open}
-                    end={item.to === '/'}
+                    end={item.end}
+                    collapsed={collapsed}
                   />
                 ))}
               </div>
@@ -192,64 +198,80 @@ export default function Layout({ children }) {
         </nav>
 
         {/* User footer */}
-        <div className="border-t border-panel-600 p-2 space-y-1">
-          {open ? (
-            <div className="px-2 pb-1">
-              <div className="text-xs font-medium text-white truncate">{user?.username}</div>
-              <div className="text-xs text-gray-500 capitalize">{user?.role}</div>
+        <div className={`border-t border-panel-subtle py-3 ${collapsed ? 'px-1.5' : 'px-3'}`}>
+          {!collapsed ? (
+            <div className="flex items-center gap-2.5 mb-2 px-1">
+              <div
+                className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold text-white"
+                style={{ background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', boxShadow: '0 0 10px rgba(99,102,241,0.3)' }}
+              >
+                {initial}
+              </div>
+              <div className="min-w-0">
+                <div className="text-[12px] font-semibold text-ink-primary truncate">{user?.username}</div>
+                <div className="text-[10px] text-ink-muted flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-brand flex-shrink-0" />
+                  {user?.role}
+                </div>
+              </div>
             </div>
           ) : (
-            <div className="flex justify-center py-1">
-              <div className="w-6 h-6 rounded-full bg-brand-600/40 flex items-center justify-center">
-                <span className="text-xs font-bold text-brand-300">
-                  {user?.username?.[0]?.toUpperCase() ?? '?'}
-                </span>
+            <div className="flex justify-center mb-2">
+              <div
+                className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white"
+                style={{ background: 'linear-gradient(135deg,#6366f1,#8b5cf6)' }}
+                title={user?.username}
+              >
+                {initial}
               </div>
             </div>
           )}
-          <div className="relative group/signout">
+
+          <div className="relative group/so">
             <button
               onClick={() => { logout(); navigate('/login'); }}
-              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-gray-500 hover:text-red-400 hover:bg-red-900/10 text-xs transition-colors ${!open ? 'justify-center' : ''}`}
+              className={`w-full flex items-center gap-2 rounded-md text-[12px] text-ink-muted
+                          hover:text-bad-light hover:bg-bad/10 transition-colors duration-150
+                          ${collapsed ? 'justify-center px-1.5 py-2' : 'px-2.5 py-1.5'}`}
+              title="Sign out"
             >
               <LogOut size={13} />
-              {open && 'Sign out'}
+              {!collapsed && 'Sign out'}
             </button>
-            {!open && (
-              <div className="pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-2 bg-panel-700 border border-panel-500 text-white text-xs rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-xl z-50 opacity-0 group-hover/signout:opacity-100 transition-opacity">
+            {collapsed && (
+              <div className="pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-2 z-50
+                              bg-panel-card border border-panel-subtle text-ink-primary text-xs
+                              rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-xl
+                              opacity-0 group-hover/so:opacity-100 transition-opacity duration-150">
                 Sign out
-                <div className="absolute right-full top-1/2 -translate-y-1/2 border-4 border-transparent border-r-panel-700" />
+                <div className="absolute right-full top-1/2 -translate-y-1/2 border-4 border-transparent border-r-panel-subtle" />
               </div>
             )}
           </div>
         </div>
       </aside>
 
-      {/* ── Main content ────────────────────────────────────────────────────── */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      {/* ── Main ───────────────────────────────────────────────────────────── */}
+      <main className="flex-1 flex flex-col min-w-0">
 
-        {/* Top bar */}
-        <header className="bg-panel-800 border-b border-panel-600 px-5 py-2.5 flex items-center justify-between flex-shrink-0">
-          <div className="flex items-center gap-1.5 text-sm text-gray-500">
-            <Cpu size={12} className="text-brand-400" />
-            <span className="text-gray-600">GnuKontrolR</span>
-            <ChevronRight size={12} />
-            <span className="text-gray-300 font-medium">{breadcrumb}</span>
+        {/* Topbar */}
+        <header className="h-12 bg-panel-surface border-b border-panel-border px-5 flex items-center justify-between flex-shrink-0">
+          <div className="flex items-center gap-1.5 text-[13px]">
+            <Cpu size={12} className="text-brand flex-shrink-0" />
+            <span className="text-ink-faint">GnuKontrolR</span>
+            <ChevronRight size={12} className="text-panel-subtle" />
+            <span className="text-ink-primary font-medium">{breadcrumb}</span>
           </div>
           <div className="flex items-center gap-3">
-            <span className={`text-xs px-2.5 py-1 rounded-full font-medium capitalize ${
-              user?.role === 'superadmin' ? 'bg-brand-600/25 text-brand-300' :
-              user?.role === 'admin'      ? 'bg-blue-600/25 text-blue-300' :
-              'bg-panel-600 text-gray-400'
-            }`}>
+            <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border capitalize ${roleColor}`}>
               {user?.role}
             </span>
-            <span className="text-xs text-gray-600 hidden md:block">{user?.email}</span>
+            <span className="text-[11px] text-ink-muted hidden md:block truncate max-w-[200px]">{user?.email}</span>
           </div>
         </header>
 
-        {/* Page content */}
-        <div className="flex-1 overflow-auto p-5">
+        {/* Content */}
+        <div className="flex-1 overflow-auto p-6">
           {children}
         </div>
       </main>

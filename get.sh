@@ -176,6 +176,9 @@ ACME_EMAIL=${ACME_EMAIL}
 
 # ── Timezone ─────────────────────────────────────────────────────────────────
 TZ=${TZ_INPUT}
+
+# ── Docker socket GID (must match host to allow panelapi to talk to dockerd) ──
+DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo "984")
 ENVEOF
 
   chmod 600 .env
