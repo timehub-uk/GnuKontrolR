@@ -35,7 +35,7 @@ CMD="${1:-help}"
 dc() { docker compose "$@"; }
 
 require_env() {
-  [[ -f .env ]] || die ".env not found. Run install.sh first."
+  [[ -f .env ]] || die ".env not found. Run get.sh first."
 }
 
 run_py() {
@@ -181,16 +181,16 @@ PYEOF
 cmd_add_user() {
   require_env
   read -rp "New username: " UNAME
+  read -rp "Email: " UEMAIL
   read -rsp "Password: " UPASS; echo
-  read -rp "Admin? [y/N]: " IS_ADMIN
-  ADMIN_FLAG="False"
-  [[ "$IS_ADMIN" =~ ^[Yy]$ ]] && ADMIN_FLAG="True"
+  read -rp "Role [user/admin/reseller/superadmin] (default: user): " UROLE
+  UROLE="${UROLE:-user}"
 
   dc exec -T webpanel python3 - <<PYEOF
 import asyncio, sys
 sys.path.insert(0, '/app')
 from app.database import init_db, AsyncSessionLocal
-from app.models.user import User
+from app.models.user import User, Role
 from app.auth import hash_password
 from sqlalchemy import select
 
@@ -200,10 +200,19 @@ async def main():
         existing = (await db.execute(select(User).where(User.username == '${UNAME}'))).scalar_one_or_none()
         if existing:
             print('User already exists'); return
-        user = User(username='${UNAME}', hashed_password=hash_password('${UPASS}'), is_admin=${ADMIN_FLAG})
+        try:
+            role = Role('${UROLE}')
+        except ValueError:
+            print(f'Invalid role: ${UROLE}. Valid: user, admin, reseller, superadmin'); return
+        user = User(
+            username='${UNAME}',
+            email='${UEMAIL}',
+            hashed_password=hash_password('${UPASS}'),
+            role=role,
+        )
         db.add(user)
         await db.commit()
-        print(f'User ${UNAME} created (admin=${ADMIN_FLAG})')
+        print(f'User ${UNAME} created (role=${UROLE})')
 
 asyncio.run(main())
 PYEOF

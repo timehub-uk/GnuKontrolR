@@ -14,9 +14,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from sqlalchemy import select
 
 from app.auth import get_current_user, require_admin
-from app.models.user import User
+from app.database import get_db
+from app.models.domain import Domain
+from app.models.user import User, Role
 
 router = APIRouter(prefix="/api/security", tags=["security"])
 
@@ -300,10 +303,17 @@ def _get_token() -> str:
 # ── Domain suggest autocomplete ───────────────────────────────────────────────
 
 @router.get("/suggest/domains")
-async def suggest_domains(q: str = "", db=None, user: User = Depends(get_current_user)):
+async def suggest_domains(
+    q: str = "",
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     """Return domain name suggestions based on query (for SmartInput autocomplete)."""
-    from sqlalchemy import select
-    from app.database import get_db
-    from app.models.domain import Domain
-    # We don't have db injected cleanly here — return empty; caller uses /api/domains
-    return []
+    stmt = select(Domain.name)
+    if user.role not in (Role.superadmin, Role.admin):
+        stmt = stmt.where(Domain.owner_id == user.id)
+    if q:
+        stmt = stmt.where(Domain.name.ilike(f"%{q}%"))
+    stmt = stmt.limit(10)
+    result = await db.execute(stmt)
+    return [row[0] for row in result.fetchall()]

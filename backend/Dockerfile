@@ -40,8 +40,8 @@ WORKDIR /app
 # Copy application source
 COPY app/ ./app/
 
-# Persistent data directory (SQLite DB lives here — mount a volume)
-RUN mkdir -p /data && chown panelapi:panelapi /data
+# Persistent data directory (SQLite DB lives here — mount a volume at /app/data)
+RUN mkdir -p /app/data && chown panelapi:panelapi /app/data
 
 # Customer site files root (mount the same volume as the customer containers)
 RUN mkdir -p /var/webpanel/sites && chown panelapi:panelapi /var/webpanel/sites

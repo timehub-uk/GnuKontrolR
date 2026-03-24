@@ -1,5 +1,6 @@
 """Docker container management — one isolated container per domain."""
 import asyncio
+import os
 import random
 import secrets
 import socket
@@ -15,6 +16,10 @@ from app.auth import require_admin, get_current_user
 from app.database import get_db
 from app.models.container_port import ContainerPort
 from app.models.user import User
+
+# Redis URL as passed to customer containers — reads from the same env var
+# the panel itself uses, so they always share the correct credentials.
+_REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 
 router = APIRouter(prefix="/api/docker", tags=["docker"])
 
@@ -242,7 +247,7 @@ async def create_domain_container(
         "-e", f"DB_NAME={db_name}",
         "-e", f"DB_USER={db_user}",
         "-e", f"DB_PASS={db_pass}",
-        "-e", f"REDIS_URL=redis://:changeme_redis@webpanel_redis:6379/0",
+        "-e", f"REDIS_URL={_REDIS_URL}",
         "-e", f"SMTP_HOST=webpanel_postfix",
         "-e", f"WEB_SERVER={body.web_server}",
         # Traefik labels for auto-SSL routing (HTTP/HTTPS — no unique port needed)

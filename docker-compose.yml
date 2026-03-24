@@ -122,7 +122,6 @@ services:
       - "587:587"
     volumes:
       - postfix_data:/var/spool/postfix
-      - ./docker/postfix/main.cf:/etc/postfix/main.cf:ro
     environment:
       - HOSTNAME=${MAIL_HOSTNAME:-mail.example.com}
       - RELAYHOST=${RELAYHOST:-}
@@ -142,7 +141,6 @@ services:
       - "995:995"
     volumes:
       - dovecot_data:/var/mail
-      - ./docker/dovecot/dovecot.conf:/etc/dovecot/dovecot.conf:ro
 
   # ── WebPanel API ───────────────────────────────────────────────────────────
   webpanel:
@@ -158,7 +156,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # manage customer containers
       - webpanel_sites:/var/webpanel/sites           # customer files
-      - webpanel_db:/data                            # SQLite DB
+      - webpanel_db:/app/data                        # SQLite DB
     environment:
       - SECRET_KEY=${SECRET_KEY:-change_me_in_production}
       - MYSQL_HOST=mysql
