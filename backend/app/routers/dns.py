@@ -7,8 +7,8 @@ from app.auth import require_admin
 
 router = APIRouter(prefix="/api/dns", tags=["dns"])
 
-PDNS_BASE = os.getenv("PDNS_API_URL", "http://powerdns:8081/api/v1/servers/localhost")
-PDNS_KEY  = os.getenv("PDNS_API_KEY", "secret")
+PDNS_BASE = os.getenv("PDNS_API_URL", "http://webpanel_powerdns:8081/api/v1/servers/localhost")
+PDNS_KEY  = os.getenv("PDNS_API_KEY", "changeme_pdns_key")
 HEADERS   = {"X-API-Key": PDNS_KEY, "Content-Type": "application/json"}
 
 async def pdns_get(path: str):
