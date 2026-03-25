@@ -198,11 +198,15 @@ async def security_check(domain: str, _=Depends(get_current_user)):
 # ── WebSocket duplex ──────────────────────────────────────────────────────────
 
 @router.websocket("/ws/{domain}")
-async def security_ws(websocket: WebSocket, domain: str):
+async def security_ws(websocket: WebSocket, domain: str, token: str = ""):
     """
     Duplex WS: sends full check results on connect, then re-runs every 30s.
     Client can send {"action": "rescan"} to trigger immediate re-scan.
     """
+    from app.auth import _decode_token
+    if not token or not _decode_token(token):
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
     await websocket.accept()
     try:
         async def send_checks():

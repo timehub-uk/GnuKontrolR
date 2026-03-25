@@ -252,6 +252,24 @@ const APP_LOGOS = {
       <line x1="16" y1="27" x2="23" y2="27" stroke="white" strokeWidth="1.5" strokeLinecap="round"/>
     </Logo>
   ),
+  symfony: (
+    <Logo bg="#1a1a2e">
+      {/* Symfony S-knot mark */}
+      <path d="M28 14c-1.5-1.8-3.5-2.8-5.5-2.8-3.5 0-6 2.5-6 5.5 0 2.5 1.5 4 4 5.5 2 1.2 3 2 3 3.5 0 1.5-1.2 2.5-2.8 2.5-1.5 0-2.8-.7-3.8-1.8l-1.5 2.2C17 30.3 19 31.5 21.5 31.5c3.8 0 6.5-2.5 6.5-6 0-2.8-1.8-4.5-4.2-6-2-1.2-2.8-2-2.8-3.2 0-1.2 1-2 2.5-2 1.2 0 2.2.5 3 1.5L28 14z" fill="white"/>
+    </Logo>
+  ),
+  laravel: (
+    <Logo bg="#f9322c">
+      {/* Laravel L letter */}
+      <text x="22" y="31" textAnchor="middle" fontSize="24" fontWeight="700" fill="white" fontFamily="Georgia,serif">L</text>
+    </Logo>
+  ),
+  codeigniter: (
+    <Logo bg="#ef4444">
+      {/* CodeIgniter flame */}
+      <path d="M22 10c0 0-2 4-2 8 0 1.5.5 3 1.5 3.5-0.5-1.5 0-3.5 1.5-4.5 0 3 2 5 2 8 0 3.5-2.5 6-5 6-3.5 0-6-2.5-6-6 0-5 4-9 5-12 .5 1 1 2 1 3.5 1-2 2-4.5 2-6.5z" fill="white"/>
+    </Logo>
+  ),
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -813,9 +831,9 @@ function SftpTab({ domains }) {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-const TABS = ['CMS', 'Webmail', 'Analytics', 'Collaboration', 'Developer', 'Utilities', 'Tools', 'SFTP'];
+const TABS = ['CMS', 'Framework', 'Webmail', 'Analytics', 'Collaboration', 'Developer', 'Utilities', 'Tools', 'SFTP'];
 const CAT_MAP = {
-  CMS: 'cms', Webmail: 'webmail', Analytics: 'analytics',
+  CMS: 'cms', Framework: 'framework', Webmail: 'webmail', Analytics: 'analytics',
   Collaboration: 'collaboration', Developer: 'developer',
   Utilities: 'utilities', Tools: 'tools',
 };
@@ -871,13 +889,28 @@ export default function MarketplacePage() {
 
       {/* App grid */}
       {tab !== 'SFTP' && (
-        apps.length === 0
-          ? <div className="card text-gray-500 text-sm text-center py-10">Loading…</div>
-          : <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {apps.map(app => (
-                <AppCard key={app.id} app={app} onInstall={setInstalling} />
-              ))}
+        domains.length === 0
+          ? (
+            <div className="panel p-10 text-center space-y-3">
+              <svg className="mx-auto mb-2 text-ink-muted" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>
+              </svg>
+              <p className="text-ink-primary font-semibold text-[15px]">No domains set up yet</p>
+              <p className="text-ink-muted text-[13px]">
+                You need to create a domain before installing apps from the Marketplace.
+              </p>
+              <a href="/domains" className="btn-primary inline-flex items-center gap-1.5 text-sm mt-2 px-5 py-2">
+                Go to Domains
+              </a>
             </div>
+          )
+          : apps.length === 0
+            ? <div className="panel text-ink-muted text-sm text-center py-10">Loading…</div>
+            : <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {apps.map(app => (
+                  <AppCard key={app.id} app={app} onInstall={setInstalling} />
+                ))}
+              </div>
       )}
 
       {/* Install modal */}

@@ -14,6 +14,13 @@ from app.database import get_db
 from app.models.user import User, Role
 
 SECRET_KEY     = os.environ.get("SECRET_KEY", "change-me-in-production-use-32-char-secret")
+_DEFAULT_KEY = "change-me-in-production-use-32-char-secret"
+if SECRET_KEY == _DEFAULT_KEY:
+    import logging as _log
+    _log.getLogger("webpanel").warning(
+        "SECURITY: SECRET_KEY is set to the default value. "
+        "Set a strong random SECRET_KEY environment variable before deploying to production."
+    )
 ALGORITHM      = "HS256"
 ACCESS_EXPIRE  = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
 REFRESH_EXPIRE = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", 7))

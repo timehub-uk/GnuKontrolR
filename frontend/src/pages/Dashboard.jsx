@@ -5,7 +5,182 @@ import api from '../utils/api';
 import {
   Cpu, MemoryStick, HardDrive, Globe, Container, Users,
   Activity, ArrowUp, ArrowDown, Server, Clock,
+  ShieldAlert, RefreshCw, ExternalLink,
 } from 'lucide-react';
+
+// ── Security Threats Card ──────────────────────────────────────────────────────
+const SEV_STYLE = {
+  CRITICAL: { cls: 'bg-bad/20 text-bad-light border-bad/30',    dot: 'bg-bad' },
+  HIGH:     { cls: 'bg-warn/20 text-warn-light border-warn/30', dot: 'bg-warn' },
+  MEDIUM:   { cls: 'bg-brand/15 text-brand-light border-brand/25', dot: 'bg-brand' },
+  LOW:      { cls: 'bg-panel-elevated text-ink-muted border-panel-border', dot: 'bg-ink-muted' },
+};
+const RANSOMWARE_BADGE = { Known: 'text-bad-light', Unknown: 'text-ink-muted' };
+
+function ThreatCard() {
+  const [data,      setData]      = useState(null);
+  const [loading,   setLoading]   = useState(true);
+  const [error,     setError]     = useState('');
+  const [secsAgo,   setSecsAgo]   = useState(0);
+  const [expanded,  setExpanded]  = useState(null);
+  const fetchedAt   = useRef(null);
+  const pollRef     = useRef(null);
+  const tickRef     = useRef(null);
+
+  const POLL_INTERVAL = 5 * 60 * 1000; // 5 min
+
+  const fetchThreats = async (bust = false) => {
+    setLoading(true);
+    setError('');
+    try {
+      if (bust) await api.delete('/api/security/threats/cache').catch(() => {});
+      const r = await api.get('/api/security/threats');
+      setData(r.data);
+      fetchedAt.current = Date.now();
+      setSecsAgo(0);
+    } catch (e) {
+      setError('Could not load threat feed — check internet connectivity.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchThreats();
+    pollRef.current = setInterval(() => fetchThreats(), POLL_INTERVAL);
+    tickRef.current = setInterval(() => {
+      if (fetchedAt.current)
+        setSecsAgo(Math.floor((Date.now() - fetchedAt.current) / 1000));
+    }, 10000);
+    return () => {
+      clearInterval(pollRef.current);
+      clearInterval(tickRef.current);
+    };
+  }, []);
+
+  const fmtAgo = s => {
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    return `${Math.floor(s / 3600)}h ago`;
+  };
+
+  const critCount = data?.threats?.filter(t => t.severity === 'CRITICAL').length ?? 0;
+  const highCount = data?.threats?.filter(t => t.severity === 'HIGH').length ?? 0;
+
+  return (
+    <div className="panel overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-panel-border">
+        <div className="flex items-center gap-2">
+          <ShieldAlert size={16} className="text-bad-light" />
+          <h2 className="text-[13px] font-semibold text-ink-primary">Global Security Threats</h2>
+          {data && (
+            <div className="flex items-center gap-1.5 ml-2">
+              {critCount > 0 && (
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-bad/20 text-bad-light border border-bad/30">
+                  {critCount} CRITICAL
+                </span>
+              )}
+              {highCount > 0 && (
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-warn/20 text-warn-light border border-warn/30">
+                  {highCount} HIGH
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {data && (
+            <span className="text-[10px] text-ink-muted">
+              CISA KEV · updated {fmtAgo(secsAgo)}
+            </span>
+          )}
+          <button
+            onClick={() => fetchThreats(true)}
+            disabled={loading}
+            title="Force refresh"
+            className="text-ink-muted hover:text-ink-primary transition-colors p-1 rounded"
+          >
+            <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+          </button>
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="overflow-auto" style={{ maxHeight: '22rem' }}>
+        {error && (
+          <div className="px-4 py-3 text-[12px] text-bad-light">{error}</div>
+        )}
+        {loading && !data && (
+          <div className="px-4 py-8 text-center text-[12px] text-ink-muted">
+            <RefreshCw size={16} className="animate-spin mx-auto mb-2" />
+            Fetching latest threat intelligence…
+          </div>
+        )}
+        {data?.threats?.map((t, i) => {
+          const sev = SEV_STYLE[t.severity] ?? SEV_STYLE.LOW;
+          const isOpen = expanded === i;
+          return (
+            <div
+              key={t.cve_id}
+              className="border-b border-panel-border/50 last:border-0 hover:bg-panel-elevated/50 transition-colors cursor-pointer"
+              onClick={() => setExpanded(isOpen ? null : i)}
+            >
+              <div className="flex items-start gap-3 px-4 py-2.5">
+                {/* Severity dot */}
+                <span className={`w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 ${sev.dot}`} />
+
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-mono text-[11px] font-bold text-ink-primary">{t.cve_id}</span>
+                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${sev.cls}`}>
+                      {t.severity}
+                    </span>
+                    {t.ransomware === 'Known' && (
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-bad/10 text-bad-light border border-bad/20">
+                        RANSOMWARE
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[12px] text-ink-secondary mt-0.5 truncate">
+                    <span className="text-ink-muted">{t.vendor} · </span>{t.product}
+                  </div>
+                  <div className="text-[11px] text-ink-muted truncate">{t.name}</div>
+
+                  {/* Expanded detail */}
+                  {isOpen && (
+                    <div className="mt-2 space-y-1 text-[11px] text-ink-muted">
+                      <div><span className="text-ink-secondary">Added:</span> {t.date_added} · <span className="text-ink-secondary">Due:</span> {t.due_date || '—'}</div>
+                      {t.notes && <div className="text-ink-muted">{t.notes}</div>}
+                      <a
+                        href={`https://nvd.nist.gov/vuln/detail/${t.cve_id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={e => e.stopPropagation()}
+                        className="inline-flex items-center gap-1 text-brand-light hover:underline"
+                      >
+                        NVD Details <ExternalLink size={10} />
+                      </a>
+                    </div>
+                  )}
+                </div>
+
+                <span className="text-[10px] text-ink-muted flex-shrink-0 mt-0.5">{t.date_added}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {data && (
+        <div className="px-4 py-2 border-t border-panel-border text-[10px] text-ink-muted flex justify-between">
+          <span>Source: CISA Known Exploited Vulnerabilities Catalog</span>
+          <span>Showing latest {data.threats?.length} of {data.count}</span>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmt(n, unit = '') { return n != null ? `${n}${unit}` : '—'; }
@@ -278,6 +453,9 @@ export default function Dashboard() {
           </div>
         ))}
       </div>
+
+      {/* ── Global security threats ───────────────────────────────────────── */}
+      <ThreatCard />
     </div>
   );
 }

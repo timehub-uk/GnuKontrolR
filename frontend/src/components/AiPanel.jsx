@@ -221,7 +221,7 @@ export default function AiPanel() {
     if (status === 'active' && domain) {
       suspendTimerRef.current = setTimeout(async () => {
         try {
-          await api.delete(`/api/ai/stop/${domain}?save_context=true`);
+          await api.delete(`/api/ai/stop/${domain}?agent=${agent}&save_context=true`);
         } catch {
           // best-effort — context saved if possible
         }
@@ -272,7 +272,7 @@ export default function AiPanel() {
       wsRef.current = null;
     }
     if (domain && (status === 'active' || status === 'starting')) {
-      api.delete(`/api/ai/stop/${domain}?save_context=true`).catch(() => {});
+      api.delete(`/api/ai/stop/${domain}?agent=${agent}&save_context=true`).catch(() => {});
     }
     setDomain(newDomain);
     setStatus('idle');
@@ -287,7 +287,7 @@ export default function AiPanel() {
         suspendTimerRef.current = null;
       }
       if ((status === 'active' || status === 'starting') && domain) {
-        api.delete(`/api/ai/stop/${domain}`).catch(() => {});
+        api.delete(`/api/ai/stop/${domain}?agent=${agent}`).catch(() => {});
       }
       if (wsRef.current) {
         wsRef.current.close();

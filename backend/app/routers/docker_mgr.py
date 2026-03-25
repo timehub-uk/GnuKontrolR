@@ -15,7 +15,8 @@ from sqlalchemy.exc import IntegrityError
 from app.auth import require_admin, get_current_user
 from app.database import get_db
 from app.models.container_port import ContainerPort
-from app.models.user import User
+from app.models.domain import Domain
+from app.models.user import User, Role
 
 # Redis URL as passed to customer containers — reads from the same env var
 # the panel itself uses, so they always share the correct credentials.
@@ -173,7 +174,11 @@ async def list_containers(_=Depends(require_admin)):
 
 
 @router.get("/containers/{domain}")
-async def get_container(domain: str, db=Depends(get_db), _=Depends(get_current_user)):
+async def get_container(domain: str, db=Depends(get_db), current: User = Depends(get_current_user)):
+    if current.role not in (Role.superadmin, Role.admin):
+        result = await db.execute(select(Domain).where(Domain.name == domain, Domain.owner_id == current.id))
+        if not result.scalar_one_or_none():
+            raise HTTPException(403, "Access denied")
     name = container_name(domain)
     code, out, err = _run(["docker", "inspect", name])
     if code != 0:
@@ -318,13 +323,18 @@ async def delete_domain_container(domain: str, db=Depends(get_db), _=Depends(req
 
 @router.get("/containers/{domain}/logs")
 async def container_logs(domain: str, tail: int = 100, _=Depends(require_admin)):
+    tail = min(max(tail, 1), 1000)
     name = container_name(domain)
     code, out, err = _run(["docker", "logs", "--tail", str(tail), name])
     return {"logs": out, "stderr": err}
 
 
 @router.get("/containers/{domain}/stats")
-async def container_stats(domain: str, _=Depends(get_current_user)):
+async def container_stats(domain: str, db=Depends(get_db), current: User = Depends(get_current_user)):
+    if current.role not in (Role.superadmin, Role.admin):
+        result = await db.execute(select(Domain).where(Domain.name == domain, Domain.owner_id == current.id))
+        if not result.scalar_one_or_none():
+            raise HTTPException(403, "Access denied")
     name = container_name(domain)
     code, out, err = _run([
         "docker", "stats", "--no-stream", "--format",

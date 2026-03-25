@@ -19,9 +19,9 @@ const SIZES = {
 };
 
 const COLORS = {
-  green: 'bg-green-500',
-  blue:  'bg-blue-500',
-  brand: 'bg-brand-500',
+  green: 'bg-ok',
+  blue:  'bg-brand',
+  brand: 'bg-brand',
 };
 
 export default function Toggle({
@@ -63,9 +63,9 @@ export default function Toggle({
         className={[
           'relative inline-flex flex-shrink-0 rounded-full border-2 border-transparent',
           'transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2',
-          'focus:ring-brand-500 focus:ring-offset-2 focus:ring-offset-panel-800',
+          'focus:ring-brand focus:ring-offset-2 focus:ring-offset-panel-surface',
           sz.track,
-          checked ? col : 'bg-panel-600',
+          checked ? col : 'bg-panel-subtle',
           disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer',
         ].join(' ')}
       >
@@ -85,17 +85,17 @@ export default function Toggle({
         <div className="flex flex-col min-w-0">
           <span className="flex items-center gap-1.5">
             {label && (
-              <span className="text-sm font-medium text-gray-200">{label}</span>
+              <span className="text-sm font-medium text-ink-secondary">{label}</span>
             )}
-            {pending && <Loader size={12} className="animate-spin text-brand-400" />}
+            {pending && <Loader size={12} className="animate-spin text-brand" />}
             {error && !pending && (
-              <span className="flex items-center gap-1 text-xs text-red-400">
+              <span className="flex items-center gap-1 text-xs text-bad-light">
                 <AlertCircle size={11} /> {error}
               </span>
             )}
           </span>
           {description && (
-            <span className="text-xs text-gray-500 mt-0.5">{description}</span>
+            <span className="text-xs text-ink-muted mt-0.5">{description}</span>
           )}
         </div>
       )}

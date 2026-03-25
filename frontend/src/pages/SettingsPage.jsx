@@ -15,7 +15,7 @@ const PROVIDERS = [
     description: 'GPT-4o, GPT-4, GPT-3.5-turbo and compatible endpoints.',
   },
   {
-    id: 'opencode_zen',
+    id: 'zen',
     name: 'Zen (OpenCode Zen)',
     description: 'OpenCode Zen provider — no API key required if using OpenCode account.',
   },
@@ -64,24 +64,24 @@ function ProviderRow({ provider, configured, onSaved }) {
   };
 
   return (
-    <div className="flex flex-col gap-2 py-4 border-b border-panel-700 last:border-0">
+    <div className="flex flex-col gap-2 py-4 border-b border-panel-subtle last:border-0">
       <div className="flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-white">{provider.name}</span>
+            <span className="text-sm font-medium text-ink-primary">{provider.name}</span>
             {configured && (
-              <span className="inline-flex items-center gap-1 text-xs text-green-400 bg-green-400/10 px-2 py-0.5 rounded-full">
+              <span className="inline-flex items-center gap-1 text-xs text-ok bg-ok/10 px-2 py-0.5 rounded-full">
                 <CheckCircle size={10} /> Configured
               </span>
             )}
           </div>
-          <p className="text-xs text-gray-500 mt-0.5">{provider.description}</p>
+          <p className="text-xs text-ink-muted mt-0.5">{provider.description}</p>
         </div>
         {configured && (
           <button
             onClick={remove}
             disabled={deleting}
-            className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50 transition-colors"
+            className="text-xs text-bad-light hover:text-bad disabled:opacity-50 transition-colors"
           >
             {deleting ? 'Removing…' : 'Remove'}
           </button>
@@ -104,7 +104,7 @@ function ProviderRow({ provider, configured, onSaved }) {
         </button>
       </div>
       {msg && (
-        <p className={`text-xs ${msg.type === 'ok' ? 'text-green-400' : 'text-red-400'}`}>
+        <p className={`text-xs ${msg.type === 'ok' ? 'text-ok' : 'text-bad-light'}`}>
           {msg.text}
         </p>
       )}
@@ -165,18 +165,18 @@ function OpenCodeRow({ connected, onRefresh }) {
   };
 
   return (
-    <div className="flex flex-col gap-2 py-4 border-b border-panel-700">
+    <div className="flex flex-col gap-2 py-4 border-b border-panel-subtle">
       <div className="flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-white">OpenCode Account</span>
+            <span className="text-sm font-medium text-ink-primary">OpenCode Account</span>
             {connected && (
-              <span className="inline-flex items-center gap-1 text-xs text-green-400 bg-green-400/10 px-2 py-0.5 rounded-full">
+              <span className="inline-flex items-center gap-1 text-xs text-ok bg-ok/10 px-2 py-0.5 rounded-full">
                 <CheckCircle size={10} /> Connected
               </span>
             )}
           </div>
-          <p className="text-xs text-gray-500 mt-0.5">
+          <p className="text-xs text-ink-muted mt-0.5">
             Sign in with your OpenCode account for access to Zen and other managed models.
           </p>
         </div>
@@ -184,7 +184,7 @@ function OpenCodeRow({ connected, onRefresh }) {
           <button
             onClick={disconnect}
             disabled={disconnecting}
-            className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50 transition-colors"
+            className="text-xs text-bad-light hover:text-bad disabled:opacity-50 transition-colors"
           >
             {disconnecting ? 'Disconnecting…' : 'Disconnect'}
           </button>
@@ -211,7 +211,7 @@ function OpenCodeRow({ connected, onRefresh }) {
         )}
       </div>
       {msg && (
-        <p className={`text-xs ${msg.type === 'ok' ? 'text-green-400' : 'text-red-400'}`}>
+        <p className={`text-xs ${msg.type === 'ok' ? 'text-ok' : 'text-bad-light'}`}>
           {msg.text}
         </p>
       )}

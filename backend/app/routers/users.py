@@ -46,7 +46,32 @@ async def get_user(user_id: int, db: AsyncSession = Depends(get_db), _=Depends(r
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(404, "User not found")
-    return user
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role,
+        "is_active": user.is_active,
+        "is_suspended": user.is_suspended,
+        "max_domains": user.max_domains,
+        "disk_quota_mb": user.disk_quota_mb,
+        "bw_quota_mb": user.bw_quota_mb,
+        "max_databases": user.max_databases,
+        "max_emails": user.max_emails,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+        "company": user.company,
+        "phone": user.phone,
+        "address_line1": user.address_line1,
+        "address_line2": user.address_line2,
+        "city": user.city,
+        "state": user.state,
+        "postcode": user.postcode,
+        "country": user.country,
+        "vat_number": user.vat_number,
+        "notes": user.notes,
+    }
 
 
 @router.patch("/{user_id}")

@@ -20,7 +20,7 @@ import psutil
 log = logging.getLogger("webpanel")
 
 from app.database import init_db
-from app.routers import auth, users, domains, server, docker_mgr, services, admin_content, container_proxy, security, activity_log, marketplace
+from app.routers import auth, users, domains, server, docker_mgr, services, admin_content, container_proxy, security, activity_log, marketplace, ai, ai_admin
 
 
 # Prometheus metrics
@@ -77,8 +77,10 @@ async def _request_lifecycle(request: Request, call_next):
     import hashlib
     from app.auth import _decode_token   # local import to avoid circular at module level
 
-    # Accept a client-supplied ID or mint a fresh UUID
-    event_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    # Accept a client-supplied ID only if it looks like a UUID (36 chars, safe characters)
+    import re as _re
+    _client_id = request.headers.get("X-Request-ID", "")
+    event_id = _client_id if (_re.match(r'^[0-9a-f-]{36}$', _client_id)) else str(uuid.uuid4())
     request.state.event_id = event_id
 
     t0 = time.perf_counter()
@@ -135,11 +137,18 @@ app.include_router(container_proxy.router)
 app.include_router(security.router)
 app.include_router(activity_log.router)
 app.include_router(marketplace.router)
+app.include_router(ai.router)
+app.include_router(ai_admin.router)
 
 
 @app.get("/api/metrics", include_in_schema=False)
-async def prometheus_metrics():
+async def prometheus_metrics(request: Request):
     """Prometheus scrape endpoint — exposes host CPU/mem/disk gauges."""
+    metrics_token = os.environ.get("METRICS_TOKEN", "")
+    if metrics_token:
+        auth = request.headers.get("Authorization", "")
+        if auth != f"Bearer {metrics_token}":
+            return Response(status_code=401)
     _cpu_gauge.set(psutil.cpu_percent())
     _mem_gauge.set(psutil.virtual_memory().percent)
     _disk_gauge.set(psutil.disk_usage("/").percent)
