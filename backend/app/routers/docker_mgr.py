@@ -65,6 +65,18 @@ def container_name(domain: str) -> str:
     return "site_" + domain.replace(".", "_").replace("-", "_")
 
 
+def resolve_container(name_or_domain: str) -> str:
+    """Return the actual Docker container name.
+    If the value already looks like a container name (contains no dots and
+    starts with a known prefix, or was passed as a raw container name from
+    the list endpoint) return it as-is.  Otherwise treat it as a domain."""
+    # Raw container names passed from the list page have no dots and are not
+    # domain-like (e.g. "webpanel_api", "site_example_com").
+    if "." not in name_or_domain:
+        return name_or_domain
+    return container_name(name_or_domain)
+
+
 async def _allocate_port(db, domain: str, service: str) -> int:
     """
     Allocate a globally unique host port for a (domain, service) pair.
@@ -300,7 +312,7 @@ class ContainerAction(BaseModel):
 
 @router.post("/containers/{domain}/action")
 async def container_action(domain: str, body: ContainerAction, _=Depends(require_admin)):
-    name = container_name(domain)
+    name = resolve_container(domain)
     if body.action not in ("start", "stop", "restart", "pause", "unpause", "kill"):
         raise HTTPException(400, "Invalid action")
     code, out, err = _run(["docker", body.action, name])
@@ -324,7 +336,7 @@ async def delete_domain_container(domain: str, db=Depends(get_db), _=Depends(req
 @router.get("/containers/{domain}/logs")
 async def container_logs(domain: str, tail: int = 100, _=Depends(require_admin)):
     tail = min(max(tail, 1), 1000)
-    name = container_name(domain)
+    name = resolve_container(domain)
     code, out, err = _run(["docker", "logs", "--tail", str(tail), name])
     return {"logs": out, "stderr": err}
 
@@ -335,7 +347,7 @@ async def container_stats(domain: str, db=Depends(get_db), current: User = Depen
         result = await db.execute(select(Domain).where(Domain.name == domain, Domain.owner_id == current.id))
         if not result.scalar_one_or_none():
             raise HTTPException(403, "Access denied")
-    name = container_name(domain)
+    name = resolve_container(domain)
     code, out, err = _run([
         "docker", "stats", "--no-stream", "--format",
         "{{json .}}", name,
