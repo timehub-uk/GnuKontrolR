@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import api from '../utils/api';
 import {
   Activity, RefreshCw, Server, Database, Wifi, Cpu,
@@ -114,10 +114,13 @@ function StatusDot({ state }) {
 // ── main page ─────────────────────────────────────────────────────────────────
 
 export default function DiagnosticPage() {
-  const [data,    setData]    = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState('');
-  const [auto,    setAuto]    = useState(true);
+  const [data,       setData]      = useState(null);
+  const [liveStats,  setLiveStats] = useState(null);
+  const [loading,    setLoading]   = useState(true);
+  const [error,      setError]     = useState('');
+  const [auto,       setAuto]      = useState(true);
+  const [wsStatus,   setWsStatus]  = useState('connecting'); // connecting | live | error
+  const wsRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -130,6 +133,38 @@ export default function DiagnosticPage() {
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  // Live WebSocket for CPU/Memory/Disk stats
+  useEffect(() => {
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const host  = window.location.hostname;
+    const port  = import.meta.env.VITE_API_PORT || '8000';
+    const url   = `${proto}://${host}:${port}/api/server/ws/stats`;
+
+    let ws;
+    let reconnectTimeout;
+
+    function connect() {
+      ws = new WebSocket(url);
+      wsRef.current = ws;
+
+      ws.onopen  = () => setWsStatus('live');
+      ws.onclose = () => {
+        setWsStatus('error');
+        reconnectTimeout = setTimeout(connect, 5000);
+      };
+      ws.onerror = () => setWsStatus('error');
+      ws.onmessage = (e) => {
+        try { setLiveStats(JSON.parse(e.data)); } catch { /* ignore */ }
+      };
+    }
+
+    connect();
+    return () => {
+      clearTimeout(reconnectTimeout);
+      ws?.close();
+    };
   }, []);
 
   useEffect(() => {
@@ -164,7 +199,21 @@ export default function DiagnosticPage() {
     unknown:  'bg-panel-card border-panel-border text-ink-muted',
   };
 
-  const s = data?.stats;
+  // Prefer live WebSocket stats for resource bars; fall back to snapshot
+  const s = liveStats
+    ? {
+        cpu_percent:   liveStats.cpu,
+        mem_percent:   liveStats.mem,
+        mem_used_mb:   liveStats.mem_used_mb,
+        mem_total_mb:  data?.stats?.mem_total_mb,
+        disk_percent:  liveStats.disk,
+        disk_used_gb:  data?.stats?.disk_used_gb,
+        disk_total_gb: data?.stats?.disk_total_gb,
+        net_sent_mb:   liveStats.net_sent,
+        net_recv_mb:   liveStats.net_recv,
+        boot_timestamp: data?.stats?.boot_timestamp,
+      }
+    : data?.stats;
   const cc = data?.customer_containers;
 
   return (
@@ -175,6 +224,10 @@ export default function DiagnosticPage() {
           <Activity size={20} /> System Diagnostic
         </h1>
         <div className="flex items-center gap-3">
+          <span className={`flex items-center gap-1.5 text-xs font-medium ${wsStatus === 'live' ? 'text-ok-light' : 'text-ink-muted'}`}>
+            <span className={`w-2 h-2 rounded-full ${wsStatus === 'live' ? 'bg-ok animate-pulse' : 'bg-ink-muted'}`} />
+            {wsStatus === 'live' ? 'Live' : wsStatus === 'connecting' ? 'Connecting…' : 'Offline'}
+          </span>
           {data && (
             <span className="text-xs text-ink-muted">
               Updated {fmtAgo(data.timestamp)}
