@@ -21,6 +21,7 @@ import AdminContentPage  from './pages/AdminContentPage';
 import ActivityLogPage   from './pages/ActivityLogPage';
 import SecurityPage      from './pages/SecurityPage';
 import MenuPage          from './pages/MenuPage';
+import AiAdminPage      from './pages/AiAdminPage';
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -56,6 +57,7 @@ export default function App() {
                 <Route path="/settings"      element={<SettingsPage />} />
                 <Route path="/activity-log" element={<ActivityLogPage />} />
                 <Route path="/menu"         element={<MenuPage />} />
+                <Route path="/ai-admin"    element={<AiAdminPage />} />
               </Routes>
             </Layout>
           </Protected>

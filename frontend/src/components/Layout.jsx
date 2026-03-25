@@ -6,8 +6,9 @@ import {
   FolderOpen, Database, Mail, ShieldCheck, ScrollText,
   HardDrive, Terminal, Settings, LogOut,
   Package, Eye, Activity, Shield, ChevronRight, Cpu,
-  LayoutGrid, PanelLeftClose, PanelLeftOpen,
+  LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit,
 } from 'lucide-react';
+import AiPanel from './AiPanel';
 
 // ── Brand logo SVG ────────────────────────────────────────────────────────────
 function BrandIcon({ size = 26 }) {
@@ -64,7 +65,8 @@ const NAV_GROUPS = [
     items: [
       { to: '/security',      icon: Shield,   label: 'Security'      },
       { to: '/activity-log',  icon: Activity, label: 'Activity Log'  },
-      { to: '/admin-content', icon: Eye,      label: 'Content Viewer', adminOnly: true },
+      { to: '/admin-content', icon: Eye,          label: 'Content Viewer', adminOnly: true },
+      { to: '/ai-admin',      icon: BrainCircuit, label: 'AI Admin',       adminOnly: true },
     ],
   },
   {
@@ -82,7 +84,7 @@ const ROUTE_LABELS = {
   '/dns': 'DNS', '/files': 'Files', '/databases': 'Databases', '/email': 'Email',
   '/ssl': 'SSL / TLS', '/backups': 'Backups', '/logs': 'Logs', '/terminal': 'Terminal',
   '/security': 'Security', '/activity-log': 'Activity Log', '/admin-content': 'Content Viewer',
-  '/users': 'Users', '/settings': 'Settings',
+  '/users': 'Users', '/settings': 'Settings', '/ai-admin': 'AI Admin',
 };
 
 // ── NavItem — full or icon-only ───────────────────────────────────────────────
@@ -149,7 +151,7 @@ export default function Layout({ children }) {
 
       {/* ── Sidebar ────────────────────────────────────────────────────────── */}
       <aside
-        className="flex-shrink-0 flex flex-col bg-panel-surface border-r border-panel-subtle transition-all duration-200"
+        className="flex-shrink-0 flex flex-col bg-panel-surface border-r border-panel-subtle transition-all duration-200 sticky top-0 h-screen overflow-y-auto"
         style={{ width: collapsed ? 52 : 220 }}
       >
         {/* Brand + collapse toggle */}
@@ -257,8 +259,14 @@ export default function Layout({ children }) {
         {/* Topbar */}
         <header className="h-12 bg-panel-surface border-b border-panel-border px-5 flex items-center justify-between flex-shrink-0">
           <div className="flex items-center gap-1.5 text-[13px]">
-            <Cpu size={12} className="text-brand flex-shrink-0" />
-            <span className="text-ink-faint">GnuKontrolR</span>
+            <button
+              onClick={() => navigate('/')}
+              className="flex items-center gap-1.5 text-ink-faint hover:text-ink-primary transition-colors"
+              title="Dashboard"
+            >
+              <Cpu size={12} className="text-brand flex-shrink-0" />
+              <span>GnuKontrolR</span>
+            </button>
             <ChevronRight size={12} className="text-panel-subtle" />
             <span className="text-ink-primary font-medium">{breadcrumb}</span>
           </div>
@@ -271,10 +279,12 @@ export default function Layout({ children }) {
         </header>
 
         {/* Content */}
-        <div className="flex-1 overflow-auto p-6">
+        <div className="flex-1 p-6">
           {children}
         </div>
       </main>
+
+      <AiPanel />
     </div>
   );
 }
