@@ -20,7 +20,7 @@ import psutil
 log = logging.getLogger("webpanel")
 
 from app.database import init_db
-from app.routers import auth, users, domains, server, docker_mgr, services, admin_content, container_proxy, security, activity_log, marketplace, ai, ai_admin
+from app.routers import auth, users, domains, server, docker_mgr, services, admin_content, container_proxy, security, activity_log, marketplace, ai, ai_admin, terminal
 
 
 # Prometheus metrics
@@ -139,6 +139,7 @@ app.include_router(activity_log.router)
 app.include_router(marketplace.router)
 app.include_router(ai.router)
 app.include_router(ai_admin.router)
+app.include_router(terminal.router)
 
 
 @app.get("/api/metrics", include_in_schema=False)

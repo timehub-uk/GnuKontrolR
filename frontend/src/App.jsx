@@ -22,6 +22,7 @@ import ActivityLogPage   from './pages/ActivityLogPage';
 import SecurityPage      from './pages/SecurityPage';
 import MenuPage          from './pages/MenuPage';
 import AiAdminPage      from './pages/AiAdminPage';
+import DiagnosticPage   from './pages/DiagnosticPage';
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -58,6 +59,7 @@ export default function App() {
                 <Route path="/activity-log" element={<ActivityLogPage />} />
                 <Route path="/menu"         element={<MenuPage />} />
                 <Route path="/ai-admin"    element={<AiAdminPage />} />
+                <Route path="/diagnostic"  element={<DiagnosticPage />} />
               </Routes>
             </Layout>
           </Protected>

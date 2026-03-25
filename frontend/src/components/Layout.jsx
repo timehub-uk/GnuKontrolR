@@ -6,7 +6,7 @@ import {
   FolderOpen, Database, Mail, ShieldCheck, ScrollText,
   HardDrive, Terminal, Settings, LogOut,
   Package, Eye, Activity, Shield, ChevronRight, Cpu,
-  LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit,
+  LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit, Stethoscope,
 } from 'lucide-react';
 import AiPanel from './AiPanel';
 
@@ -43,8 +43,9 @@ const NAV_GROUPS = [
   {
     label: 'Services',
     items: [
-      { to: '/services',    icon: Server,  label: 'Master Services', adminOnly: true },
-      { to: '/marketplace', icon: Package, label: 'Marketplace' },
+      { to: '/services',    icon: Server,       label: 'Master Services', adminOnly: true },
+      { to: '/diagnostic',  icon: Stethoscope, label: 'Diagnostic',       adminOnly: true },
+      { to: '/marketplace', icon: Package,      label: 'Marketplace' },
     ],
   },
   {
@@ -85,6 +86,7 @@ const ROUTE_LABELS = {
   '/ssl': 'SSL / TLS', '/backups': 'Backups', '/logs': 'Logs', '/terminal': 'Terminal',
   '/security': 'Security', '/activity-log': 'Activity Log', '/admin-content': 'Content Viewer',
   '/users': 'Users', '/settings': 'Settings', '/ai-admin': 'AI Admin',
+  '/diagnostic': 'Diagnostic',
 };
 
 // ── NavItem — full or icon-only ───────────────────────────────────────────────

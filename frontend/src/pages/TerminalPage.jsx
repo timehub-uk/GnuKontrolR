@@ -18,11 +18,15 @@ export default function TerminalPage() {
       fitAddon.fit();
 
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = new WebSocket(`${proto}://${location.host}/api/terminal/ws`);
+      const token = localStorage.getItem('access_token') || '';
+      ws = new WebSocket(`${proto}://${location.host}/api/terminal/ws?token=${encodeURIComponent(token)}`);
       ws.onopen    = () => term.writeln('\x1b[32mConnected to WebPanel Terminal\x1b[0m\r\n');
       ws.onmessage = e => term.write(e.data);
       ws.onclose   = () => term.writeln('\r\n\x1b[31mConnection closed\x1b[0m');
       term.onData(data => ws.readyState === 1 && ws.send(data));
+      term.onResize(({ cols, rows }) => {
+        if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+      });
 
       const resizeObs = new ResizeObserver(() => fitAddon.fit());
       resizeObs.observe(containerRef.current);
@@ -32,8 +36,8 @@ export default function TerminalPage() {
 
   return (
     <div className="space-y-4 h-full flex flex-col">
-      <h1 className="text-xl font-bold text-white flex items-center gap-2"><Terminal size={20} />Web Terminal</h1>
-      <div ref={containerRef} className="flex-1 rounded-xl overflow-hidden border border-panel-600 min-h-96" />
+      <h1 className="text-xl font-bold text-ink-primary flex items-center gap-2"><Terminal size={20} />Web Terminal</h1>
+      <div ref={containerRef} className="flex-1 rounded-xl overflow-hidden border border-panel-subtle min-h-96" />
     </div>
   );
 }
