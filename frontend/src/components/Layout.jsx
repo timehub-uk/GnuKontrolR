@@ -9,6 +9,7 @@ import {
   LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit, Stethoscope,
 } from 'lucide-react';
 import AiPanel from './AiPanel';
+import CommandPalette from './CommandPalette';
 
 // ── Brand logo SVG ────────────────────────────────────────────────────────────
 function BrandIcon({ size = 26 }) {
@@ -287,6 +288,7 @@ export default function Layout({ children }) {
       </main>
 
       <AiPanel />
+      <CommandPalette />
     </div>
   );
 }

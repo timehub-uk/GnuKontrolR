@@ -1,19 +1,37 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { createColumnHelper } from '@tanstack/react-table';
+import { toast } from 'sonner';
 import api from '../utils/api';
-import { Globe, Plus, Trash2, RefreshCw, ShieldCheck } from 'lucide-react';
+import { fmtDate } from '../utils/dates';
+import DataTable from '../components/DataTable';
+import { Globe, Plus, Trash2, RefreshCw, ShieldCheck, Shield } from 'lucide-react';
+
+const STATUS_BADGE = {
+  active:    'bg-ok/15 text-ok-light border border-ok/25',
+  suspended: 'bg-bad/15 text-bad-light border border-bad/25',
+  pending:   'bg-warn/15 text-warn-light border border-warn/25',
+};
+
+const col = createColumnHelper();
 
 export default function DomainsPage() {
-  const [domains, setDomains] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [form, setForm]       = useState({ name: '', php_version: '8.2', domain_type: 'main' });
-  const [adding, setAdding]   = useState(false);
-  const [showForm, setShowForm] = useState(false);
+  const [domains,   setDomains]   = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [form,      setForm]      = useState({ name: '', php_version: '8.2', domain_type: 'main' });
+  const [adding,    setAdding]    = useState(false);
+  const [showForm,  setShowForm]  = useState(false);
+  const [deleting,  setDeleting]  = useState(null); // domain id pending delete confirm
 
   const load = async () => {
     setLoading(true);
-    const { data } = await api.get('/api/domains/');
-    setDomains(data);
-    setLoading(false);
+    try {
+      const { data } = await api.get('/api/domains/');
+      setDomains(data);
+    } catch {
+      toast.error('Failed to load domains');
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { load(); }, []);
@@ -23,28 +41,83 @@ export default function DomainsPage() {
     setAdding(true);
     try {
       await api.post('/api/domains/', form);
+      toast.success(`Domain ${form.name} added`);
       setShowForm(false);
       setForm({ name: '', php_version: '8.2', domain_type: 'main' });
       await load();
     } catch (err) {
-      alert(err.response?.data?.detail || 'Error adding domain');
-    } finally { setAdding(false); }
+      toast.error(err.response?.data?.detail || 'Error adding domain');
+    } finally {
+      setAdding(false);
+    }
   };
 
-  const deleteDomain = async id => {
-    if (!confirm('Delete this domain?')) return;
-    await api.delete(`/api/domains/${id}`);
-    load();
+  const confirmDelete = async id => {
+    try {
+      await api.delete(`/api/domains/${id}`);
+      toast.success('Domain deleted');
+      setDeleting(null);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Delete failed');
+    }
   };
 
-  const statusColor = s => ({ active: 'badge-green', suspended: 'badge-red', pending: 'badge-yellow' }[s] || 'badge-blue');
+  const columns = useMemo(() => [
+    col.accessor('name', {
+      header: 'Domain',
+      cell: i => <span className="font-medium text-ink-primary">{i.getValue()}</span>,
+    }),
+    col.accessor('domain_type', {
+      header: 'Type',
+      cell: i => <span className="text-ink-secondary capitalize">{i.getValue()}</span>,
+    }),
+    col.accessor('status', {
+      header: 'Status',
+      cell: i => (
+        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_BADGE[i.getValue()] ?? 'bg-panel-elevated text-ink-muted'}`}>
+          {i.getValue()}
+        </span>
+      ),
+    }),
+    col.accessor('php_version', {
+      header: 'PHP',
+      cell: i => <span className="text-ink-muted">PHP {i.getValue()}</span>,
+    }),
+    col.accessor('ssl_enabled', {
+      header: 'SSL',
+      enableSorting: false,
+      cell: i => i.getValue()
+        ? <ShieldCheck size={14} className="text-ok" />
+        : <Shield size={14} className="text-ink-muted/40" />,
+    }),
+    col.accessor('created_at', {
+      header: 'Created',
+      cell: i => <span className="text-ink-muted text-xs">{fmtDate(i.getValue())}</span>,
+    }),
+    col.display({
+      id: 'actions',
+      header: '',
+      cell: ({ row }) => (
+        <button
+          onClick={() => setDeleting(row.original.id)}
+          className="text-ink-muted hover:text-bad transition-colors p-1 rounded"
+          title="Delete domain"
+        >
+          <Trash2 size={13} />
+        </button>
+      ),
+    }),
+  ], []);
 
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-white flex items-center gap-2"><Globe size={20} />Domains</h1>
+        <h1 className="text-xl font-bold text-ink-primary flex items-center gap-2">
+          <Globe size={20} /> Domains
+        </h1>
         <div className="flex gap-2">
-          <button onClick={load} className="btn-ghost"><RefreshCw size={14} /></button>
+          <button onClick={load} className="btn-ghost" disabled={loading}><RefreshCw size={14} className={loading ? 'animate-spin' : ''} /></button>
           <button onClick={() => setShowForm(s => !s)} className="btn-primary flex items-center gap-2">
             <Plus size={14} /> Add Domain
           </button>
@@ -53,7 +126,7 @@ export default function DomainsPage() {
 
       {showForm && (
         <div className="card">
-          <h2 className="text-sm font-semibold text-white mb-4">Add New Domain</h2>
+          <h2 className="text-sm font-semibold text-ink-primary mb-4">Add New Domain</h2>
           <form onSubmit={addDomain} className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <input className="input" placeholder="example.com" value={form.name}
               onChange={e => setForm(f => ({ ...f, name: e.target.value }))} required />
@@ -71,46 +144,28 @@ export default function DomainsPage() {
             </select>
             <div className="md:col-span-3 flex gap-2 justify-end">
               <button type="button" onClick={() => setShowForm(false)} className="btn-ghost">Cancel</button>
-              <button type="submit" disabled={adding} className="btn-primary">{adding ? 'Adding…' : 'Add Domain'}</button>
+              <button type="submit" disabled={adding} className="btn-primary">
+                {adding ? 'Adding…' : 'Add Domain'}
+              </button>
             </div>
           </form>
         </div>
       )}
 
-      <div className="card p-0 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-panel-700 text-gray-400 text-xs uppercase">
-            <tr>
-              {['Domain','Type','Status','PHP','SSL','Created','Actions'].map(h => (
-                <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-panel-700">
-            {loading ? (
-              <tr><td colSpan={7} className="text-center py-8 text-gray-500">Loading…</td></tr>
-            ) : domains.length === 0 ? (
-              <tr><td colSpan={7} className="text-center py-8 text-gray-500">No domains yet</td></tr>
-            ) : domains.map(d => (
-              <tr key={d.id} className="hover:bg-panel-700/50 transition-colors">
-                <td className="px-4 py-3 font-medium text-white">{d.name}</td>
-                <td className="px-4 py-3 text-gray-400 capitalize">{d.domain_type}</td>
-                <td className="px-4 py-3"><span className={statusColor(d.status)}>{d.status}</span></td>
-                <td className="px-4 py-3 text-gray-400">PHP {d.php_version}</td>
-                <td className="px-4 py-3">
-                  {d.ssl_enabled ? <ShieldCheck size={14} className="text-green-400" /> : <span className="text-gray-600">—</span>}
-                </td>
-                <td className="px-4 py-3 text-gray-500 text-xs">{new Date(d.created_at).toLocaleDateString()}</td>
-                <td className="px-4 py-3">
-                  <button onClick={() => deleteDomain(d.id)} className="text-gray-500 hover:text-red-400 transition-colors">
-                    <Trash2 size={14} />
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {/* Delete confirm */}
+      {deleting && (
+        <div className="card border-bad/30 bg-bad/5">
+          <p className="text-sm text-ink-primary mb-3">Delete this domain? This cannot be undone.</p>
+          <div className="flex gap-2">
+            <button onClick={() => confirmDelete(deleting)} className="btn-primary bg-bad hover:bg-bad/80 border-bad/50 text-xs px-3 py-1.5">
+              Delete
+            </button>
+            <button onClick={() => setDeleting(null)} className="btn-ghost text-xs px-3 py-1.5">Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <DataTable columns={columns} data={domains} loading={loading} emptyMessage="No domains yet — add one above" />
     </div>
   );
 }

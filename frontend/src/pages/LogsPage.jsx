@@ -1,5 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import CodeMirror from '@uiw/react-codemirror';
+import { oneDark } from '@codemirror/theme-one-dark';
+import { EditorView } from '@codemirror/view';
+import { format } from 'date-fns';
+
+// Line-wrap extension — safe to initialise at module level (pure CodeMirror 6)
+const lineWrap = EditorView.lineWrapping;
 import {
   ScrollText, RefreshCw, Download, Search, X,
   ChevronDown, Activity, Loader,
@@ -9,43 +16,34 @@ import api from '../utils/api';
 const SYSTEM_SOURCES = [
   { id: 'panel',    label: 'Panel API',   color: 'text-brand-light' },
   { id: 'postgres', label: 'PostgreSQL',  color: 'text-sky-400' },
-  { id: 'redis',    label: 'Redis',       color: 'text-red-400' },
-  { id: 'mysql',    label: 'MySQL',       color: 'text-orange-400' },
-  { id: 'traefik',  label: 'Traefik',     color: 'text-purple-400' },
-  { id: 'postfix',  label: 'Postfix',     color: 'text-yellow-400' },
-  { id: 'dovecot',  label: 'Dovecot',     color: 'text-pink-400' },
+  { id: 'redis',    label: 'Redis',       color: 'text-bad-light' },
+  { id: 'mysql',    label: 'MySQL',       color: 'text-warn-light' },
+  { id: 'traefik',  label: 'Traefik',     color: 'text-brand-light' },
+  { id: 'postfix',  label: 'Postfix',     color: 'text-warn-light' },
+  { id: 'dovecot',  label: 'Dovecot',     color: 'text-ok-light' },
 ];
 
 const TAIL_OPTIONS = [50, 100, 200, 500, 1000];
 
-function classifyLine(line) {
-  const l = line.toLowerCase();
-  if (/\berror\b|exception|fatal|critical|fail/.test(l)) return 'text-red-400';
-  if (/\bwarn(ing)?\b/.test(l)) return 'text-yellow-300';
-  if (/\binfo\b/.test(l)) return 'text-green-300';
-  if (/\bdebug\b/.test(l)) return 'text-sky-300';
-  return 'text-gray-300';
-}
-
 export default function LogsPage() {
   const [searchParams] = useSearchParams();
-  const [domains,    setDomains]    = useState([]);
-  const [source,     setSource]     = useState(searchParams.get('source') || 'panel');
-  const [tail,       setTail]       = useState(200);
-  const [search,     setSearch]     = useState('');
-  const [lines,      setLines]      = useState([]);
-  const [loading,    setLoading]    = useState(false);
-  const [autoFollow, setAutoFollow] = useState(true);
-  const [autoRefresh, setAutoRefresh] = useState(false);
-  const [lastFetch,  setLastFetch]  = useState(null);
-  const [error,      setError]      = useState('');
+  const [domains,      setDomains]     = useState([]);
+  const [source,       setSource]      = useState(searchParams.get('source') || 'panel');
+  const [tail,         setTail]        = useState(200);
+  const [search,       setSearch]      = useState('');
+  const [content,      setContent]     = useState('');
+  const [lineCount,    setLineCount]   = useState(0);
+  const [loading,      setLoading]     = useState(false);
+  const [autoFollow,   setAutoFollow]  = useState(true);
+  const [autoRefresh,  setAutoRefresh] = useState(false);
+  const [lastFetch,    setLastFetch]   = useState(null);
+  const [error,        setError]       = useState('');
 
-  const bottomRef   = useRef(null);
   const intervalRef = useRef(null);
   const searchRef   = useRef(search);
   searchRef.current = search;
+  const editorRef   = useRef(null);
 
-  // Load domain list for container log option
   useEffect(() => {
     api.get('/api/domains').then(r => {
       const list = r.data?.domains || r.data || [];
@@ -54,33 +52,28 @@ export default function LogsPage() {
   }, []);
 
   const fetchLogs = useCallback(async (src, tailN, srch) => {
-    const s   = src  ?? source;
-    const t   = tailN ?? tail;
-    const q   = srch !== undefined ? srch : searchRef.current;
+    const s = src  ?? source;
+    const t = tailN ?? tail;
+    const q = srch !== undefined ? srch : searchRef.current;
     setLoading(true);
     setError('');
     try {
       const params = { tail: t };
       if (q) params.search = q;
       const r = await api.get(`/api/logs/${encodeURIComponent(s)}`, { params });
-      setLines(r.data.lines || []);
-      setLastFetch(new Date().toLocaleTimeString());
+      const lines = r.data.lines || [];
+      setContent(lines.join('\n'));
+      setLineCount(lines.length);
+      setLastFetch(format(new Date(), 'HH:mm:ss'));
     } catch (e) {
       setError(e?.response?.data?.detail || 'Failed to load logs');
-      setLines([]);
+      setContent('');
+      setLineCount(0);
     } finally {
       setLoading(false);
     }
   }, [source, tail]);
 
-  // Auto-scroll to bottom when lines change and autoFollow is on
-  useEffect(() => {
-    if (autoFollow) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [lines, autoFollow]);
-
-  // Auto-refresh every 5 s
   useEffect(() => {
     clearInterval(intervalRef.current);
     if (autoRefresh) {
@@ -89,19 +82,26 @@ export default function LogsPage() {
     return () => clearInterval(intervalRef.current);
   }, [autoRefresh, fetchLogs]);
 
-  // Fetch on source/tail change
   useEffect(() => {
     fetchLogs(source, tail, search);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source, tail]);
 
-  const handleSourceChange = (id) => {
+  // Auto-scroll CodeMirror to bottom when autoFollow and content changes
+  useEffect(() => {
+    if (!autoFollow || !editorRef.current) return;
+    // Scroll the editor's scroll element to the bottom
+    const scroller = editorRef.current?.querySelector('.cm-scroller');
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  }, [content, autoFollow]);
+
+  const handleSourceChange = id => {
     setSource(id);
-    setLines([]);
+    setContent('');
     setError('');
   };
 
-  const handleSearch = (e) => {
+  const handleSearch = e => {
     e.preventDefault();
     fetchLogs(source, tail, search);
   };
@@ -121,14 +121,22 @@ export default function LogsPage() {
     } catch { /* ignore */ }
   };
 
-  // Build full source list: system sources + domain containers
   const domainSources = domains.map(d => {
     const name = d.name || d;
-    return { id: `domain:${name}`, label: name, color: 'text-teal-400' };
+    return { id: `domain:${name}`, label: name, color: 'text-ok-light' };
   });
 
   const allSources = [...SYSTEM_SOURCES, ...domainSources];
   const activeSource = allSources.find(s => s.id === source);
+
+  // Inline panel theme override — created inside component so EditorView is fully ready
+  const panelTheme = EditorView.theme({
+    '&': { backgroundColor: 'transparent', height: '100%' },
+    '.cm-content': { fontFamily: '"Cascadia Code", "Fira Code", monospace', fontSize: '12px' },
+    '.cm-gutters': { backgroundColor: 'rgba(0,0,0,0.3)', borderRight: '1px solid rgba(255,255,255,0.06)' },
+    '.cm-activeLineGutter': { backgroundColor: 'rgba(99,102,241,0.08)' },
+    '.cm-activeLine': { backgroundColor: 'rgba(99,102,241,0.05)' },
+  });
 
   return (
     <div className="flex flex-col space-y-4">
@@ -146,147 +154,110 @@ export default function LogsPage() {
           {lastFetch && (
             <span className="text-[11px] text-ink-muted">Updated {lastFetch}</span>
           )}
-          <button
-            onClick={() => fetchLogs()}
-            disabled={loading}
-            className="btn-ghost flex items-center gap-1.5 text-xs py-1.5 px-3"
-          >
-            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
-            Refresh
+          <button onClick={() => fetchLogs()} disabled={loading}
+            className="btn-ghost flex items-center gap-1.5 text-xs py-1.5 px-3">
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} /> Refresh
           </button>
-          <button
-            onClick={handleDownload}
-            className="btn-ghost flex items-center gap-1.5 text-xs py-1.5 px-3"
-          >
+          <button onClick={handleDownload}
+            className="btn-ghost flex items-center gap-1.5 text-xs py-1.5 px-3">
             <Download size={13} /> Download
           </button>
         </div>
       </div>
 
-      {/* Controls row */}
+      {/* Controls */}
       <div className="flex items-center gap-3 flex-wrap flex-shrink-0">
-        {/* Source selector */}
         <div className="relative">
-          <select
-            value={source}
-            onChange={e => handleSourceChange(e.target.value)}
-            className="input pr-8 appearance-none w-48"
-          >
+          <select value={source} onChange={e => handleSourceChange(e.target.value)}
+            className="input pr-8 appearance-none w-48">
             <optgroup label="System Services">
-              {SYSTEM_SOURCES.map(s => (
-                <option key={s.id} value={s.id}>{s.label}</option>
-              ))}
+              {SYSTEM_SOURCES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
             </optgroup>
             {domainSources.length > 0 && (
               <optgroup label="Domain Containers">
-                {domainSources.map(s => (
-                  <option key={s.id} value={s.id}>{s.label}</option>
-                ))}
+                {domainSources.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
               </optgroup>
             )}
           </select>
           <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted pointer-events-none" />
         </div>
 
-        {/* Tail */}
         <div className="relative">
-          <select
-            value={tail}
-            onChange={e => { setTail(Number(e.target.value)); }}
-            className="input pr-8 appearance-none w-28"
-          >
-            {TAIL_OPTIONS.map(n => (
-              <option key={n} value={n}>{n} lines</option>
-            ))}
+          <select value={tail} onChange={e => { setTail(Number(e.target.value)); }}
+            className="input pr-8 appearance-none w-28">
+            {TAIL_OPTIONS.map(n => <option key={n} value={n}>{n} lines</option>)}
           </select>
           <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted pointer-events-none" />
         </div>
 
-        {/* Search */}
         <form onSubmit={handleSearch} className="flex items-center gap-1.5 flex-1 max-w-sm">
           <div className="relative flex-1">
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-muted" />
-            <input
-              type="text"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Filter lines…"
-              className="input pl-8 pr-8 w-full"
-            />
+            <input type="text" value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="Filter lines…" className="input pl-8 pr-8 w-full" />
             {search && (
-              <button
-                type="button"
-                onClick={() => { setSearch(''); fetchLogs(source, tail, ''); }}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink-primary"
-              >
+              <button type="button" onClick={() => { setSearch(''); fetchLogs(source, tail, ''); }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink-primary">
                 <X size={12} />
               </button>
             )}
           </div>
-          <button type="submit" className="btn-ghost py-1.5 px-3 text-xs">
-            Search
-          </button>
+          <button type="submit" className="btn-ghost py-1.5 px-3 text-xs">Search</button>
         </form>
 
-        {/* Auto-refresh toggle */}
         <label className="flex items-center gap-1.5 text-[12px] text-ink-muted cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={autoRefresh}
-            onChange={e => setAutoRefresh(e.target.checked)}
-            className="accent-brand w-3.5 h-3.5"
-          />
+          <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)}
+            className="accent-brand w-3.5 h-3.5" />
           <Activity size={12} className={autoRefresh ? 'text-brand-light' : ''} />
           Auto-refresh
         </label>
 
-        {/* Auto-follow toggle */}
         <label className="flex items-center gap-1.5 text-[12px] text-ink-muted cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={autoFollow}
-            onChange={e => setAutoFollow(e.target.checked)}
-            className="accent-brand w-3.5 h-3.5"
-          />
+          <input type="checkbox" checked={autoFollow} onChange={e => setAutoFollow(e.target.checked)}
+            className="accent-brand w-3.5 h-3.5" />
           Auto-follow
         </label>
       </div>
 
-      {/* Source label badge */}
       {activeSource && (
         <div className="flex items-center gap-2 flex-shrink-0">
           <span className={`text-[11px] font-semibold uppercase tracking-wide ${activeSource.color}`}>
             {activeSource.label}
           </span>
-          <span className="text-[11px] text-ink-muted">— {lines.length} lines</span>
+          <span className="text-[11px] text-ink-muted">— {lineCount} lines</span>
           {loading && <Loader size={11} className="animate-spin text-ink-muted" />}
         </div>
       )}
 
-      {/* Error */}
       {error && (
         <div className="flex-shrink-0 text-bad-light bg-bad/10 border border-bad/20 rounded-lg px-3 py-2 text-xs">
           {error}
         </div>
       )}
 
-      {/* Log output */}
+      {/* CodeMirror log viewer */}
       <div
-        className="bg-black/70 rounded-xl border border-panel-border overflow-auto p-4 font-mono text-xs"
+        ref={editorRef}
+        className="rounded-xl border border-panel-border overflow-hidden"
         style={{ minHeight: '28rem', maxHeight: '70vh' }}
       >
-        {!loading && lines.length === 0 && !error && (
-          <span className="text-ink-muted">No log lines. Select a source and press Refresh.</span>
-        )}
-        {lines.map((line, i) => (
-          <div
-            key={i}
-            className={`leading-relaxed whitespace-pre-wrap break-all ${classifyLine(line)}`}
-          >
-            {line}
-          </div>
-        ))}
-        <div ref={bottomRef} />
+        <CodeMirror
+          value={content || (loading ? 'Loading…' : 'No log lines. Select a source and press Refresh.')}
+          theme={[oneDark, panelTheme]}
+          readOnly
+          extensions={[lineWrap]}
+          basicSetup={{
+            lineNumbers: true,
+            foldGutter: false,
+            dropCursor: false,
+            allowMultipleSelections: false,
+            indentOnInput: false,
+            highlightActiveLine: true,
+            highlightSelectionMatches: false,
+          }}
+          height="100%"
+          style={{ height: '100%' }}
+        />
       </div>
     </div>
   );
