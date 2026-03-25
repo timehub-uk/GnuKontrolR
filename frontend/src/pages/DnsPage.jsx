@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import api from '../utils/api';
-import { Globe, Plus, Trash2, RefreshCw, AlertTriangle } from 'lucide-react';
+import { toastSuccess, toastError } from '../utils/toast';
+import { Globe, Plus, Trash2, RefreshCw, AlertTriangle, Loader, ShieldCheck } from 'lucide-react';
 
 const DNS_PORTS = [
   { port: 53,  proto: 'UDP', desc: 'DNS queries' },
@@ -33,10 +34,12 @@ function PortPill({ port, proto }) {
 }
 
 export default function DnsPage() {
-  const [domains,  setDomains]  = useState([]);
-  const [selected, setSelected] = useState('');
-  const [records,  setRecords]  = useState([]);
-  const [dnsState, setDnsState] = useState(null);
+  const [domains,   setDomains]   = useState([]);
+  const [selected,  setSelected]  = useState('');
+  const [records,   setRecords]   = useState([]);
+  const [dnsState,  setDnsState]  = useState(null);
+  const [loading,   setLoading]   = useState(false);
+  const [ensuring,  setEnsuring]  = useState(false);
   const [form, setForm] = useState({ type: 'A', name: '', content: '', ttl: 300 });
 
   const DNS_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'CAA'];
@@ -52,6 +55,77 @@ export default function DnsPage() {
       setDnsState(r.data?.powerdns ?? 'unknown');
     }).catch(() => setDnsState('unknown'));
   }, []);
+
+  // Flatten PowerDNS rrsets into display rows
+  const parseRrsets = (rrsets) => {
+    const rows = [];
+    for (const rrset of (rrsets || [])) {
+      const name = (rrset.name || '').replace(/\.$/, '');
+      for (const rec of (rrset.records || [])) {
+        if (!rec.disabled) {
+          rows.push({ type: rrset.type, name, content: rec.content, ttl: rrset.ttl });
+        }
+      }
+    }
+    return rows;
+  };
+
+  const loadRecords = async () => {
+    if (!selected) return;
+    setLoading(true);
+    try {
+      const { data } = await api.get(`/api/dns/zones/${selected}`);
+      const rrsets = data?.rrsets || data?.records || [];
+      setRecords(parseRrsets(rrsets));
+    } catch (e) {
+      toastError(e?.response?.data?.detail || 'Failed to load DNS records');
+      setRecords([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleEnsureZone = async () => {
+    if (!selected) return;
+    setEnsuring(true);
+    try {
+      await api.post(`/api/dns/zones/ensure?zone=${encodeURIComponent(selected)}`);
+      toastSuccess(`Zone ${selected} ensured in PowerDNS`);
+      await loadRecords();
+    } catch (e) {
+      toastError(e?.response?.data?.detail || 'Failed to create zone');
+    } finally {
+      setEnsuring(false);
+    }
+  };
+
+  const handleAddRecord = async () => {
+    if (!selected || !form.name || !form.content) return;
+    try {
+      await api.post(`/api/dns/zones/${selected}/records`, {
+        name: form.name,
+        type: form.type,
+        content: form.content,
+        ttl: form.ttl,
+      });
+      toastSuccess('DNS record added');
+      setForm({ type: 'A', name: '', content: '', ttl: 300 });
+      await loadRecords();
+    } catch (e) {
+      toastError(e?.response?.data?.detail || 'Failed to add record');
+    }
+  };
+
+  const handleDeleteRecord = async (name, type) => {
+    if (!selected) return;
+    try {
+      await api.delete(`/api/dns/zones/${selected}/records?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`);
+      toastSuccess('Record deleted');
+      await loadRecords();
+    } catch (e) {
+      toastError(e?.response?.data?.detail || 'Failed to delete record');
+    }
+  };
 
   return (
     <div className="space-y-5">
@@ -90,7 +164,7 @@ export default function DnsPage() {
         <select
           className="input w-56"
           value={selected}
-          onChange={e => setSelected(e.target.value)}
+          onChange={e => { setSelected(e.target.value); setRecords([]); }}
         >
           {domains.length === 0 && <option value="">No domains</option>}
           {domains.map(d => {
@@ -98,8 +172,21 @@ export default function DnsPage() {
             return <option key={name} value={name}>{name}</option>;
           })}
         </select>
-        <button className="btn-ghost flex items-center gap-1.5 text-sm py-1.5 px-3">
-          <RefreshCw size={14} /> Load Records
+        <button
+          onClick={loadRecords}
+          disabled={loading || !selected}
+          className="btn-ghost flex items-center gap-1.5 text-sm py-1.5 px-3 disabled:opacity-50"
+        >
+          {loading ? <Loader size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+          Load Records
+        </button>
+        <button
+          onClick={handleEnsureZone}
+          disabled={ensuring || !selected}
+          className="btn-ghost flex items-center gap-1.5 text-sm py-1.5 px-3 disabled:opacity-50 text-brand-light"
+        >
+          {ensuring ? <Loader size={14} className="animate-spin" /> : <ShieldCheck size={14} />}
+          Create Zone
         </button>
       </div>
 
@@ -115,9 +202,13 @@ export default function DnsPage() {
           <input className="input md:col-span-2" placeholder="Content / Value" value={form.content}
             onChange={e => setForm(f => ({ ...f, content: e.target.value }))} />
           <input className="input" type="number" placeholder="TTL" value={form.ttl}
-            onChange={e => setForm(f => ({ ...f, ttl: parseInt(e.target.value) }))} />
+            onChange={e => setForm(f => ({ ...f, ttl: parseInt(e.target.value) || 300 }))} />
         </div>
-        <button className="btn-primary mt-3 flex items-center gap-1.5 text-sm">
+        <button
+          onClick={handleAddRecord}
+          disabled={!selected || !form.name || !form.content}
+          className="btn-primary mt-3 flex items-center gap-1.5 text-sm disabled:opacity-50"
+        >
           <Plus size={14} /> Add Record
         </button>
       </div>
@@ -133,7 +224,13 @@ export default function DnsPage() {
             </tr>
           </thead>
           <tbody>
-            {records.length === 0 ? (
+            {loading ? (
+              <tr>
+                <td colSpan={5} className="text-center py-10 text-ink-muted text-sm">
+                  <Loader size={16} className="animate-spin inline mr-2" />Loading records…
+                </td>
+              </tr>
+            ) : records.length === 0 ? (
               <tr>
                 <td colSpan={5} className="text-center py-10 text-ink-muted text-sm">
                   Select a domain and click <span className="text-brand-light">Load Records</span> to view DNS records.
@@ -146,7 +243,11 @@ export default function DnsPage() {
                 <td className="tbl-cell font-mono text-xs text-ink-secondary">{r.content}</td>
                 <td className="tbl-cell text-ink-muted">{r.ttl}</td>
                 <td className="tbl-cell">
-                  <button className="text-ink-muted hover:text-bad-light transition-colors p-1">
+                  <button
+                    onClick={() => handleDeleteRecord(r.name, r.type)}
+                    className="text-ink-muted hover:text-bad-light transition-colors p-1"
+                    title="Delete record"
+                  >
                     <Trash2 size={13} />
                   </button>
                 </td>

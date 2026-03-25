@@ -3,7 +3,7 @@ import asyncio
 import subprocess
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
-from app.auth import require_superadmin
+from app.auth import require_admin
 from app.models.user import User
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
@@ -43,7 +43,7 @@ def _docker_logs(container: str, tail: int = 200, search: str = "") -> list[str]
 
 
 @router.get("/sources")
-async def list_sources(_: User = Depends(require_superadmin)):
+async def list_sources(_: User = Depends(require_admin)):
     """Return available log sources."""
     return {"sources": [{"id": k, "label": k.capitalize()} for k in SOURCES]}
 
@@ -53,13 +53,13 @@ async def get_logs(
     source: str,
     tail: int = Query(200, ge=10, le=2000),
     search: str = Query("", max_length=200),
-    _: User = Depends(require_superadmin),
+    _: User = Depends(require_admin),
 ):
     """Fetch logs for a named source (system service or domain container)."""
     # Domain containers: source like "domain:example.com"
     if source.startswith("domain:"):
         domain = source.split(":", 1)[1]
-        container = f"domain_{domain.replace('.', '_')}"
+        container = f"site_{domain.replace('.', '_').replace('-', '_')}"
     elif source in SOURCES:
         container = SOURCES[source]
     else:
@@ -73,11 +73,11 @@ async def get_logs(
 async def download_logs(
     source: str,
     tail: int = Query(1000, ge=100, le=10000),
-    _: User = Depends(require_superadmin),
+    _: User = Depends(require_admin),
 ):
     """Download logs as a plain text file."""
     if source.startswith("domain:"):
-        container = "domain_" + source.split(":", 1)[1].replace(".", "_")
+        container = "site_" + source.split(":", 1)[1].replace(".", "_").replace("-", "_")
     elif source in SOURCES:
         container = SOURCES[source]
     else:

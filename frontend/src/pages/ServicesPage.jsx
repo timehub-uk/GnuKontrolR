@@ -145,7 +145,7 @@ export default function ServicesPage() {
                 <button
                   onClick={() => control(key, 'start')}
                   title="Start"
-                  className="flex items-center justify-center w-7 h-7 rounded-md text-ink-muted hover:text-ok-light hover:bg-ok/10 transition-colors"
+                  className="flex items-center justify-center w-7 h-7 rounded-md text-ok-light bg-ok/10 hover:bg-ok/20 disabled:text-ink-muted disabled:bg-transparent transition-colors"
                 >
                   <Play size={13} />
                 </button>
@@ -153,7 +153,7 @@ export default function ServicesPage() {
                 <button
                   onClick={() => control(key, 'stop')}
                   title="Stop"
-                  className="flex items-center justify-center w-7 h-7 rounded-md text-ink-muted hover:text-warn-light hover:bg-warn/10 transition-colors"
+                  className="flex items-center justify-center w-7 h-7 rounded-md text-warn-light bg-warn/10 hover:bg-warn/20 disabled:text-ink-muted disabled:bg-transparent transition-colors"
                 >
                   <Square size={13} />
                 </button>
@@ -161,7 +161,7 @@ export default function ServicesPage() {
                 <button
                   onClick={() => control(key, 'restart')}
                   title="Restart"
-                  className="flex items-center justify-center w-7 h-7 rounded-md text-ink-muted hover:text-brand-light hover:bg-brand/10 transition-colors"
+                  className="flex items-center justify-center w-7 h-7 rounded-md text-brand-light bg-brand/10 hover:bg-brand/20 disabled:text-ink-muted disabled:bg-transparent transition-colors"
                 >
                   <RotateCcw size={13} />
                 </button>

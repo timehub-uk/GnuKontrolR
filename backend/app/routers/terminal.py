@@ -77,12 +77,10 @@ async def terminal_ws(websocket: WebSocket, db: AsyncSession = Depends(get_db)):
     token = websocket.query_params.get("token", "")
     # Validate token before accepting
     from app.auth import _decode_token
-    payload = _decode_token(token)
-    if not payload:
+    user_id = _decode_token(token)
+    if not user_id:
         await websocket.close(code=4001)
         return
-
-    user_id = int(payload.get("sub", 0))
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
