@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from pathlib import Path
 from prometheus_client import (
     Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST,
@@ -163,6 +163,11 @@ if STATIC_DIR.exists():
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
-    async def spa_fallback(full_path: str):
+    async def spa_fallback(full_path: str, request: Request):
+        # For API/WS paths: redirect no-trailing-slash to trailing-slash so the
+        # actual API route gets a chance to match, rather than serving HTML.
+        if full_path.startswith("api/") or full_path.startswith("ws/"):
+            url = request.url
+            return RedirectResponse(str(url).rstrip("/") + "/", status_code=307)
         index = STATIC_DIR / "index.html"
         return FileResponse(index)
