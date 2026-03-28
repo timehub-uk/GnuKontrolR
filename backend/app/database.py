@@ -46,7 +46,7 @@ async def _run_column_migrations(conn) -> None:
 
 
 async def init_db():
-    from app.models import user, domain, container_port, request_log, ai_provider, app_cache, installed_app, notification, fail2ban, domain_ip_rule, country_data, scanner, email_security, site_backup  # noqa — registers models
+    from app.models import user, domain, container_port, request_log, ai_provider, app_cache, installed_app, notification, fail2ban, domain_ip_rule, country_data, scanner, email_security, site_backup, ai_session  # noqa — registers models
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _run_column_migrations(conn)
