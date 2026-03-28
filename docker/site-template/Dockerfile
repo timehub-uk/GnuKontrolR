@@ -108,10 +108,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends sudo \
        >> /etc/sudoers.d/webuser-self \
     && chmod 440 /etc/sudoers.d/webuser-self
 
-# Install Flask for container API
+# Install Flask for container API + ClamAV for malware scanning
 RUN apt-get update && apt-get install -y --no-install-recommends python3-pip python3-flask \
+        clamav clamav-daemon \
     && rm -rf /var/lib/apt/lists/* \
-    || (pip3 install flask --break-system-packages)
+    || (pip3 install flask --break-system-packages) \
+    # Update virus definitions on build (freshclam uses mirrors.clamav.net)
+    && (freshclam --quiet || true)
 
 # Copy container API
 COPY container_api.py /container_api.py

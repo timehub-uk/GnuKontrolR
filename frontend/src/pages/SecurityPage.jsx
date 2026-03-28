@@ -20,6 +20,8 @@ import api from '../utils/api';
 import SecurityAdvisor from '../components/SecurityAdvisor';
 import SecurityScanner from '../components/SecurityScanner';
 import EmailSecurityPanel from '../components/EmailSecurityPanel';
+import CveFeed from '../components/CveFeed';
+import Fail2banPanel from '../components/Fail2banPanel';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -304,6 +306,8 @@ export default function SecurityPage() {
     { id: 'events',  label: 'Security Events', icon: Flame },
     { id: 'scanner', label: 'AV Scanner',      icon: ShieldAlert },
     { id: 'email',   label: 'Email Security',  icon: Network },
+    { id: 'fail2ban',label: 'Fail2ban',        icon: ShieldOff },
+    { id: 'cve',     label: 'CVE Feed',        icon: AlertCircle },
   ];
 
   return (
@@ -367,6 +371,14 @@ export default function SecurityPage() {
 
       {tab === 'email' && (
         <EmailSecurityPanel domains={domains} />
+      )}
+
+      {tab === 'fail2ban' && (
+        <Fail2banPanel />
+      )}
+
+      {tab === 'cve' && (
+        <CveFeed />
       )}
     </div>
   );

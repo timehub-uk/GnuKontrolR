@@ -68,7 +68,12 @@ export default function BackupsPage() {
     timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
     try {
       const r = await api.post(`/api/container/${selectedDomain}/site-backup/create`, { type: backupType });
-      setMsg(`Backup created: ${r.data.filename} (${fmtBytes(r.data.size)})`);
+      const { filename, size, unique_id, csc_token } = r.data;
+      setMsg(
+        `Backup created: ${filename} (${fmtBytes(size)})` +
+        (unique_id ? `\nID: ${unique_id}` : '') +
+        (csc_token ? `\nCSC: ${csc_token}` : '')
+      );
       loadBackups();
     } catch (e) {
       setError(e?.response?.data?.detail || 'Backup creation failed');
@@ -200,7 +205,7 @@ export default function BackupsPage() {
             </div>
           )}
           {msg && (
-            <div className="text-ok-light bg-ok/10 border border-ok/20 rounded-lg px-4 py-2.5 text-sm">
+            <div className="text-ok-light bg-ok/10 border border-ok/20 rounded-lg px-4 py-2.5 text-sm whitespace-pre-wrap font-mono text-[11px]">
               {msg}
             </div>
           )}

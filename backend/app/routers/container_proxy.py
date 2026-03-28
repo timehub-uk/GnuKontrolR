@@ -332,9 +332,31 @@ async def create_site_backup(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Trigger a site backup in the domain container.  type: website|files|db|full."""
+    """Trigger a site backup in the domain container.  type: website|files|db|full.
+    Records the backup in the DB with a unique ID and CSC verification token.
+    """
     await _assert_domain_access(domain, user, db)
-    return await _proxy_post(_container_api_url(domain, "/site-backup/create"), {"type": body.type})
+    result = await _proxy_post(_container_api_url(domain, "/site-backup/create"), {"type": body.type})
+
+    # Record in DB with unique_id + csc_token for verification
+    from app.models.site_backup import SiteBackup
+    record = SiteBackup(
+        domain=domain,
+        filename=result.get("filename", ""),
+        backup_type=body.type,
+        size=result.get("size"),
+        created_by=user.id,
+    )
+    db.add(record)
+    await db.commit()
+    await db.refresh(record)
+
+    return {
+        **result,
+        "unique_id":  record.unique_id,
+        "csc_token":  record.csc_token,
+        "db_id":      record.id,
+    }
 
 
 @router.delete("/{domain}/site-backup/{filename}")
