@@ -4,10 +4,10 @@
 
 set -e
 
-DOMAIN="${DOMAIN:-localhost}"
-WEB_SERVER="${WEB_SERVER:-nginx}"
-NODE_APP="${NODE_APP:-/var/www/html/app.js}"
-NODE_ENABLED="${NODE_ENABLED:-false}"
+export DOMAIN="${DOMAIN:-localhost}"
+export WEB_SERVER="${WEB_SERVER:-nginx}"
+export NODE_APP="${NODE_APP:-/var/www/html/app.js}"
+export NODE_ENABLED="${NODE_ENABLED:-false}"
 
 # ── Expose DB config to PHP ──────────────────────────────────────────────────
 cat > /usr/local/etc/php/conf.d/env.ini <<INI
@@ -59,9 +59,55 @@ else
     export NODE_ENABLED=false
 fi
 
+# ── Private MariaDB initialization ───────────────────────────────────────────
+# On first boot, initialize the data directory and set the root password.
+# Uses the DB_PASS env var as the MySQL root password for this container.
+MYSQL_DATA=/var/db/mysql
+if [ ! -d "${MYSQL_DATA}/mysql" ]; then
+    echo "[webpanel] Initializing private MariaDB instance..."
+    mkdir -p "${MYSQL_DATA}" /var/run/mysqld
+    chown -R mysql:mysql "${MYSQL_DATA}" /var/run/mysqld
+    mariadb-install-db --user=mysql --datadir="${MYSQL_DATA}" --skip-test-db \
+        --auth-root-authentication-method=normal > /dev/null 2>&1 || true
+    # Start MariaDB temporarily to set root password
+    mariadbd --user=mysql --datadir="${MYSQL_DATA}" \
+        --socket=/var/run/mysqld/mysqld.sock \
+        --pid-file=/var/run/mysqld/init.pid \
+        --skip-networking --skip-grant-tables &
+    MYSQL_INIT_PID=$!
+    sleep 3
+    DB_ROOT_PASS="${DB_PASS:-$(head -c 32 /dev/urandom | base64 | tr -d '/+=')}"
+    mariadb --socket=/var/run/mysqld/mysqld.sock <<MSQL
+FLUSH PRIVILEGES;
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}';
+DELETE FROM mysql.user WHERE User='';
+FLUSH PRIVILEGES;
+MSQL
+    # Store root password for container-api to use
+    echo "${DB_ROOT_PASS}" > /var/db/mysql_root_pass
+    chmod 600 /var/db/mysql_root_pass
+    chown gnukontrolr-admin:gnukontrolr /var/db/mysql_root_pass
+    kill "${MYSQL_INIT_PID}" 2>/dev/null && wait "${MYSQL_INIT_PID}" 2>/dev/null || true
+    echo "[webpanel] Private MariaDB initialized."
+fi
+# Ensure mysqld socket dir is always available (tmpfs recreated on restart)
+mkdir -p /var/run/mysqld && chown mysql:mysql /var/run/mysqld
+
 # ── Ensure dirs ───────────────────────────────────────────────────────────────
 mkdir -p /var/run/php /var/log/supervisor
 chown -R www-data:www-data /var/www/html /var/customer 2>/dev/null || true
+
+# ── webuser: domain SSH user — add to www-data group for web content access ──
+# webuser can read/write /var/www/html (group gnukontrolr, mode g+w)
+usermod -a -G www-data webuser 2>/dev/null || true
+# Ensure webuser SSH dir is locked down (not visible to www-data)
+mkdir -p /home/webuser/.ssh
+chmod 700 /home/webuser
+chmod 700 /home/webuser/.ssh
+chown -R webuser:webuser /home/webuser
+touch /home/webuser/.ssh/authorized_keys
+chmod 600 /home/webuser/.ssh/authorized_keys
+chown webuser:webuser /home/webuser/.ssh/authorized_keys
 
 # ── Secure area: gnukontrolr-admin owns it, www-data cannot touch it ──────────
 # gnukontrolr-admin runs the container API (port 9000) and manages /var/config.
@@ -88,6 +134,9 @@ if command -v mount >/dev/null 2>&1; then
 fi
 
 # ── SSH setup ─────────────────────────────────────────────────────────────────
+# Create privilege separation dir required by sshd
+mkdir -p /run/sshd
+
 # Generate host keys if missing (first boot)
 if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
     ssh-keygen -A 2>/dev/null || true
@@ -97,6 +146,15 @@ fi
 mkdir -p /home/www-data/.ssh
 chmod 700 /home/www-data/.ssh
 chown www-data:www-data /home/www-data/.ssh
+
+# Ensure gnukontrolr-admin home + SSH dir are locked down (not visible to www-data)
+mkdir -p /home/gnukontrolr-admin/.ssh
+chmod 700 /home/gnukontrolr-admin
+chmod 700 /home/gnukontrolr-admin/.ssh
+chown -R gnukontrolr-admin:gnukontrolr /home/gnukontrolr-admin
+touch /home/gnukontrolr-admin/.ssh/authorized_keys
+chmod 600 /home/gnukontrolr-admin/.ssh/authorized_keys
+chown gnukontrolr-admin:gnukontrolr /home/gnukontrolr-admin/.ssh/authorized_keys
 
 # If an SSH_PUBLIC_KEY env var is provided, install it
 if [ -n "$SSH_PUBLIC_KEY" ]; then

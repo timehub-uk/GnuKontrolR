@@ -9,6 +9,7 @@ import re
 import socket
 import ssl
 import subprocess
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -302,6 +303,72 @@ async def auto_fix(domain: str, body: FixRequest, _=Depends(require_admin)):
 def _get_token() -> str:
     import os
     return os.environ.get("CONTAINER_API_TOKEN", "")
+
+
+# ── Global threat intelligence (CISA KEV) ─────────────────────────────────────
+
+_threats_cache: dict | None = None
+_threats_cache_ts: float = 0
+_THREATS_TTL = 300  # 5 minutes
+
+
+@router.get("/threats")
+async def get_threats(_=Depends(get_current_user)):
+    """
+    Return recent CISA Known Exploited Vulnerabilities (KEV) catalog entries.
+    Cached for 5 minutes to avoid hammering the CISA API.
+    """
+    global _threats_cache, _threats_cache_ts
+    now = time.time()
+    if _threats_cache is not None and (now - _threats_cache_ts) < _THREATS_TTL:
+        return _threats_cache
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get("https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json")
+            r.raise_for_status()
+            data = r.json()
+        # Return the 20 most recently added vulnerabilities
+        vulns = data.get("vulnerabilities", [])
+        vulns_sorted = sorted(vulns, key=lambda v: v.get("dateAdded", ""), reverse=True)[:20]
+        threats = []
+        for v in vulns_sorted:
+            severity = "HIGH"
+            product = v.get("product", "")
+            vendor = v.get("vendorProject", "")
+            if "critical" in v.get("shortDescription", "").lower():
+                severity = "CRITICAL"
+            elif any(x in v.get("shortDescription", "").lower() for x in ["remote code", "rce", "unauthenticated"]):
+                severity = "CRITICAL"
+            threats.append({
+                "id": v.get("cveID", ""),
+                "title": f"{vendor} {product} — {v.get('vulnerabilityName', '')}",
+                "severity": severity,
+                "date_added": v.get("dateAdded", ""),
+                "due_date": v.get("dueDate", ""),
+                "description": v.get("shortDescription", ""),
+                "ransomware_use": v.get("knownRansomwareCampaignUse", "Unknown"),
+                "nvd_url": f"https://nvd.nist.gov/vuln/detail/{v.get('cveID', '')}",
+            })
+        result = {"threats": threats, "count": len(data.get("vulnerabilities", [])),
+                  "catalog_version": data.get("catalogVersion", ""), "fetched_at": datetime.utcnow().isoformat()}
+        _threats_cache = result
+        _threats_cache_ts = now
+        return result
+    except Exception as e:
+        # Return empty on error rather than crashing the dashboard
+        return {"threats": [], "count": 0, "catalog_version": "", "error": str(e),
+                "fetched_at": datetime.utcnow().isoformat()}
+
+
+@router.delete("/threats/cache")
+async def clear_threats_cache(_=Depends(require_admin)):
+    """Force next call to re-fetch from CISA."""
+    global _threats_cache, _threats_cache_ts
+    _threats_cache = None
+    _threats_cache_ts = 0
+    return {"ok": True}
 
 
 # ── Domain suggest autocomplete ───────────────────────────────────────────────

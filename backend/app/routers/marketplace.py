@@ -8,14 +8,27 @@ GET  /api/marketplace/apps                     — full app catalogue
 GET  /api/marketplace/installed/{domain}       — apps already installed on domain
 POST /api/marketplace/install                  — start an install job
 GET  /api/marketplace/install/status/{domain}/{job_id}  — poll job progress
+GET  /api/marketplace/cache                    — list panel-side cached archives
+POST /api/marketplace/cache/refresh            — download/update cache for all apps
+POST /api/marketplace/cache/refresh/{app_id}  — refresh one app
+DELETE /api/marketplace/cache/{app_id}         — purge an app's cached archives
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 import secrets
 import string
+import os
+import json
+import time
+import shutil
+import threading
+import urllib.request
+from pathlib import Path
 
-from app.auth import get_current_user
+from datetime import datetime
+from app.auth import get_current_user, require_admin
+from app.database import get_db as get_db_dep
 from app.routers.container_proxy import _container_api_url, _TLS_VERIFY
 import httpx
 
@@ -762,3 +775,234 @@ def _get_token(domain: str) -> str:
     if token_file.exists():
         return token_file.read_text().strip()
     return os.environ.get("CONTAINER_API_TOKEN", "")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Panel-side Marketplace App Cache ─────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Archives are stored at /var/webpanel/app-cache/ on the panel host and
+# bind-mounted read-only into every site container at /var/cache/gnukontrolr/apps.
+# The container_api.py _download_cached() checks that path first, so containers
+# install from the local cache without touching the internet.
+#
+# Layout:
+#   /var/webpanel/app-cache/
+#     manifest.json                 — {app_id: [{version, filename, size, cached_at}]}
+#     wordpress.tar.gz              — the LATEST version (always present, ready to use)
+#     wordpress-6.3.tar.gz          — older version (kept until pruned)
+#     wordpress-6.4.tar.gz
+#     joomla.tar.gz
+#     ...
+#
+# Up to APP_CACHE_KEEP_VERSIONS older archives are kept per app.
+# ─────────────────────────────────────────────────────────────────────────────
+
+APP_CACHE_DIR           = Path("/var/webpanel/app-cache")
+APP_CACHE_KEEP_VERSIONS = 3   # keep this many old versions per app
+
+# Maps app_id → (download_url, canonical_filename)
+# Mirrors APP_DOWNLOADS in container_api.py — this is the panel-side copy.
+_APP_DOWNLOADS = {
+    "wordpress":   ("https://wordpress.org/latest.tar.gz",                                                "wordpress.tar.gz"),
+    "joomla":      ("https://downloads.joomla.org/cms/joomla5/latest/Joomla_latest-Stable-Full_Package.tar.gz", "joomla.tar.gz"),
+    "drupal":      ("https://www.drupal.org/download-latest/tar.gz",                                       "drupal.tar.gz"),
+    "grav":        ("https://getgrav.org/download/core/grav/latest",                                       "grav.zip"),
+    "roundcube":   ("https://github.com/roundcube/roundcubemail/releases/download/1.6.9/roundcubemail-1.6.9-complete.tar.gz", "roundcube.tar.gz"),
+    "snappymail":  ("https://github.com/the-djmaze/snappymail/releases/download/v2.38.2/snappymail-2.38.2.tar.gz", "snappymail.tar.gz"),
+    "phpmyadmin":  ("https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz",  "phpmyadmin.tar.gz"),
+    "adminer":     ("https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php",         "adminer.php"),
+    "ghost":       ("https://github.com/TryGhost/Ghost/releases/download/v5.82.2/Ghost-5.82.2.zip",        "ghost.zip"),
+    "october":     ("https://github.com/octobercms/october/archive/refs/tags/v3.5.30.tar.gz",              "october.tar.gz"),
+    "matomo":      ("https://builds.matomo.org/matomo-5.0.3.zip",                                          "matomo.zip"),
+    "nextcloud":   ("https://download.nextcloud.com/server/releases/nextcloud-28.0.3.tar.bz2",             "nextcloud.tar.bz2"),
+    "bookstack":   ("https://github.com/BookStackApp/BookStack/archive/refs/tags/v23.12.2.tar.gz",         "bookstack.tar.gz"),
+    "freshrss":    ("https://github.com/FreshRSS/FreshRSS/archive/refs/tags/1.24.1.tar.gz",               "freshrss.tar.gz"),
+    "wikijs":      ("https://github.com/requarks/wiki/releases/download/v2.5.303/wiki-js.tar.gz",          "wikijs.tar.gz"),
+    "gitea":       ("https://dl.gitea.com/gitea/1.21.11/gitea-1.21.11-linux-amd64",                       "gitea-bin"),
+    "vaultwarden": ("https://github.com/dani-garcia/vaultwarden/releases/download/1.30.5/vaultwarden-1.30.5-linux-amd64.tar.gz", "vaultwarden.tar.gz"),
+    "piwigo":      ("https://piwigo.org/download/dlcounter.php?code=latest",                               "piwigo.zip"),
+    "moodle":      ("https://download.moodle.org/download.php/direct/stable404/moodle-latest-404.tgz",    "moodle.tgz"),
+    "prestashop":  ("https://github.com/PrestaShop/PrestaShop/releases/download/8.1.7/prestashop_8.1.7.zip", "prestashop.zip"),
+    "opencart":    ("https://github.com/opencart/opencart/releases/download/4.0.2.3/opencart-4.0.2.3.tar.gz", "opencart.tar.gz"),
+}
+
+_cache_lock = threading.Lock()
+
+
+def _cache_app(app_id: str) -> dict:
+    """
+    Download the canonical archive for app_id into APP_CACHE_DIR.
+    Saves a versioned copy, writes to DB (via sync SQLAlchemy), and
+    prunes old files beyond APP_CACHE_KEEP_VERSIONS. Thread-safe.
+    Returns a status dict.
+    """
+    if app_id not in _APP_DOWNLOADS:
+        return {"ok": False, "error": f"Unknown app: {app_id}"}
+
+    url, filename = _APP_DOWNLOADS[app_id]
+    dest = APP_CACHE_DIR / filename
+
+    with _cache_lock:
+        APP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = APP_CACHE_DIR / f".tmp-{filename}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "GnuKontrolR-Cache/1.0"})
+            with urllib.request.urlopen(req, timeout=180) as resp, open(str(tmp), "wb") as fh:
+                shutil.copyfileobj(resp, fh)
+            size = tmp.stat().st_size
+            shutil.move(str(tmp), str(dest))
+            # Keep a versioned timestamped copy
+            ts_str = str(int(time.time()))
+            stem   = Path(filename).stem
+            ext    = "".join(Path(filename).suffixes)
+            versioned_name = f"{stem}-{ts_str}{ext}"
+            versioned = APP_CACHE_DIR / versioned_name
+            shutil.copy2(str(dest), str(versioned))
+
+            # Write to DB (sync, runs inside a thread already)
+            _db_record_cached(app_id, url, filename, versioned_name, size)
+
+            return {"ok": True, "app_id": app_id, "filename": filename, "size_kb": size // 1024}
+        except Exception as exc:
+            tmp.unlink(missing_ok=True)
+            return {"ok": False, "app_id": app_id, "error": str(exc)}
+
+
+def _db_record_cached(app_id: str, url: str, canonical: str, versioned: str, size: int):
+    """Write/update the DB records for a freshly cached app. Runs synchronously."""
+    import asyncio
+    from sqlalchemy import select as _sel, delete as _del
+    from sqlalchemy.orm import Session
+    from sqlalchemy import create_engine
+    from app.models.app_cache import AppCacheEntry
+    from app.database import DB_PATH
+
+    engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+    now = datetime.utcnow()
+    with Session(engine) as s:
+        # Mark previous canonical as non-canonical
+        s.query(AppCacheEntry).filter_by(app_id=app_id, is_canonical=True).update({"is_canonical": False})
+        # Insert canonical entry (upsert by filename)
+        existing = s.query(AppCacheEntry).filter_by(app_id=app_id, filename=canonical).first()
+        if existing:
+            existing.size_bytes   = size
+            existing.is_canonical = True
+            existing.source_url   = url
+            existing.cached_at    = now
+        else:
+            s.add(AppCacheEntry(app_id=app_id, filename=canonical, size_bytes=size,
+                                is_canonical=True, source_url=url, cached_at=now))
+        # Insert versioned copy entry
+        s.add(AppCacheEntry(app_id=app_id, filename=versioned, size_bytes=size,
+                            is_canonical=False, source_url=url, cached_at=now))
+        s.commit()
+
+        # Prune: keep only the most recent APP_CACHE_KEEP_VERSIONS non-canonical rows per app
+        old_rows = (
+            s.query(AppCacheEntry)
+             .filter_by(app_id=app_id, is_canonical=False)
+             .order_by(AppCacheEntry.cached_at.asc())
+             .all()
+        )
+        while len(old_rows) > APP_CACHE_KEEP_VERSIONS:
+            row = old_rows.pop(0)
+            f = APP_CACHE_DIR / row.filename
+            f.unlink(missing_ok=True)
+            s.delete(row)
+        s.commit()
+    engine.dispose()
+
+
+# ── Cache API endpoints ────────────────────────────────────────────────────────
+
+@router.get("/cache")
+async def list_cache(db=Depends(get_db_dep), _=Depends(require_admin)):
+    """List all cached marketplace archives with version history from the database."""
+    from sqlalchemy import select as _sel
+    from app.models.app_cache import AppCacheEntry
+
+    rows = (await db.execute(_sel(AppCacheEntry).order_by(AppCacheEntry.app_id, AppCacheEntry.cached_at.desc()))).scalars().all()
+
+    # Group by app_id
+    by_app: dict = {}
+    for row in rows:
+        by_app.setdefault(row.app_id, {"canonical": None, "versions": []})
+        entry = {
+            "id":           row.id,
+            "filename":     row.filename,
+            "size_kb":      row.size_bytes // 1024,
+            "cached_at":    row.cached_at.isoformat() if row.cached_at else None,
+            "is_canonical": row.is_canonical,
+        }
+        if row.is_canonical:
+            by_app[row.app_id]["canonical"] = entry
+        else:
+            by_app[row.app_id]["versions"].append(entry)
+
+    result = []
+    for app_id, url_filename in _APP_DOWNLOADS.items():
+        _, filename = url_filename
+        canonical_file = APP_CACHE_DIR / filename
+        app_data = by_app.get(app_id, {"canonical": None, "versions": []})
+        result.append({
+            "app_id":        app_id,
+            "filename":      filename,
+            "cached":        canonical_file.exists(),
+            "size_kb":       canonical_file.stat().st_size // 1024 if canonical_file.exists() else 0,
+            "canonical":     app_data["canonical"],
+            "versions":      app_data["versions"],
+        })
+
+    cached_count = sum(1 for e in result if e["cached"])
+    return {"apps": result, "cached": cached_count, "total": len(result), "cache_dir": str(APP_CACHE_DIR)}
+
+
+@router.post("/cache/refresh")
+async def refresh_all_cache(background_tasks: BackgroundTasks, _=Depends(require_admin)):
+    """
+    Download/refresh the latest version of every app in the background.
+    Returns immediately — large downloads may take several minutes.
+    Check GET /api/marketplace/cache for progress.
+    """
+    def _run_all():
+        for app_id in _APP_DOWNLOADS:
+            _cache_app(app_id)
+
+    background_tasks.add_task(_run_all)
+    return {
+        "ok":   True,
+        "apps": list(_APP_DOWNLOADS.keys()),
+        "note": "Downloading in background. Poll GET /api/marketplace/cache to track progress.",
+    }
+
+
+@router.post("/cache/refresh/{app_id}")
+async def refresh_one_cache(app_id: str, _=Depends(require_admin)):
+    """Download/refresh the cache for a single app (synchronous — waits for download)."""
+    if app_id not in _APP_DOWNLOADS:
+        raise HTTPException(404, f"Unknown app: {app_id}")
+    result = _cache_app(app_id)
+    if not result["ok"]:
+        raise HTTPException(500, result.get("error", "Download failed"))
+    return result
+
+
+@router.delete("/cache/{app_id}")
+async def purge_app_cache(app_id: str, db=Depends(get_db_dep), _=Depends(require_admin)):
+    """Remove all cached archives for an app (files + DB rows)."""
+    from sqlalchemy import select as _sel, delete as _del
+    from app.models.app_cache import AppCacheEntry
+    if app_id not in _APP_DOWNLOADS:
+        raise HTTPException(404, f"Unknown app: {app_id}")
+    _, filename = _APP_DOWNLOADS[app_id]
+    removed = []
+    stem = Path(filename).stem
+    if APP_CACHE_DIR.exists():
+        for f in APP_CACHE_DIR.iterdir():
+            if f.name == filename or f.name.startswith(f"{stem}-"):
+                f.unlink(missing_ok=True)
+                removed.append(f.name)
+    await db.execute(_del(AppCacheEntry).where(AppCacheEntry.app_id == app_id))
+    await db.commit()
+    return {"ok": True, "app_id": app_id, "removed": removed}

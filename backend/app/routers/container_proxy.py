@@ -151,6 +151,72 @@ async def sftp_info(domain: str, _=Depends(get_current_user)):
     return await _proxy_get(_container_api_url(domain, "/sftp/info"))
 
 
+# ── SSL certificate upload proxy ──────────────────────────────────────────────
+
+class SslUploadBody(BaseModel):
+    cert: str = ""
+    key: str = ""
+
+
+@router.post("/{domain}/secure/ssl")
+async def upload_ssl(domain: str, body: SslUploadBody, _=Depends(require_admin)):
+    """Upload a custom SSL certificate + private key to the domain container."""
+    return await _proxy_post(_container_api_url(domain, "/secure/ssl"), {"cert": body.cert, "key": body.key})
+
+
+# ── Site backup proxy ──────────────────────────────────────────────────────────
+
+@router.get("/{domain}/site-backup/list")
+async def list_site_backups(domain: str, _=Depends(get_current_user)):
+    """List available full-site backups for the domain container."""
+    return await _proxy_get(_container_api_url(domain, "/site-backup/list"))
+
+
+@router.post("/{domain}/site-backup/create")
+async def create_site_backup(domain: str, _=Depends(get_current_user)):
+    """Trigger a full-site backup (webroot + database) in the domain container."""
+    return await _proxy_post(_container_api_url(domain, "/site-backup/create"), {})
+
+
+@router.delete("/{domain}/site-backup/{filename}")
+async def delete_site_backup(domain: str, filename: str, _=Depends(require_admin)):
+    """Delete a named site backup file from the domain container."""
+    headers = {"Authorization": f"Bearer {CONTAINER_API_TOKEN}"} if CONTAINER_API_TOKEN else {}
+    async with httpx.AsyncClient(timeout=15, verify=_TLS_VERIFY) as client:
+        try:
+            r = await client.delete(
+                _container_api_url(domain, f"/site-backup/{filename}"), headers=headers
+            )
+            r.raise_for_status()
+            return r.json()
+        except httpx.ConnectError:
+            raise HTTPException(503, "Container not reachable")
+        except Exception as exc:
+            raise HTTPException(500, str(exc))
+
+
+@router.get("/{domain}/site-backup/download/{filename}")
+async def download_site_backup(domain: str, filename: str, _=Depends(get_current_user)):
+    """Stream a site backup file from the domain container."""
+    from fastapi.responses import StreamingResponse
+    headers = {"Authorization": f"Bearer {CONTAINER_API_TOKEN}"} if CONTAINER_API_TOKEN else {}
+    async with httpx.AsyncClient(timeout=120, verify=_TLS_VERIFY) as client:
+        try:
+            r = await client.get(
+                _container_api_url(domain, f"/site-backup/download/{filename}"), headers=headers
+            )
+            r.raise_for_status()
+            return StreamingResponse(
+                iter([r.content]),
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        except httpx.ConnectError:
+            raise HTTPException(503, "Container not reachable")
+        except Exception as exc:
+            raise HTTPException(500, str(exc))
+
+
 @router.delete("/{domain}/sftp/revoke")
 async def sftp_revoke(domain: str, _=Depends(require_admin)):
     """Revoke SFTP access — removes OS user and keys."""

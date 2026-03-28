@@ -14,6 +14,19 @@ entryPoints:
   websecure:
     address: ":443"
 
+  smtp:
+    address: ":25"
+  submission:
+    address: ":587"
+  imap:
+    address: ":143"
+  imaps:
+    address: ":993"
+  pop3:
+    address: ":110"
+  pop3s:
+    address: ":995"
+
 certificatesResolvers:
   le:
     acme:

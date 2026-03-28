@@ -1,7 +1,5 @@
 # GnuKontrolR — Customer container SSH hardening
 # Customer SSH is restricted to SFTP-only within their chroot.
-# The secure area (/var/config), system files, and gnukontrolr-admin
-# are completely invisible and inaccessible from any SSH session.
 
 Port 22
 Protocol 2
@@ -12,9 +10,9 @@ HostKey /etc/ssh/ssh_host_rsa_key
 
 # ── Authentication ────────────────────────────────────────────────────────────
 PermitRootLogin no
-PasswordAuthentication no              # key-only — no brute-force risk
+PasswordAuthentication no
 PubkeyAuthentication yes
-AuthorizedKeysFile /home/www-data/.ssh/authorized_keys
+AuthorizedKeysFile %h/.ssh/authorized_keys
 AuthenticationMethods publickey
 PermitEmptyPasswords no
 ChallengeResponseAuthentication no
@@ -22,24 +20,14 @@ KerberosAuthentication no
 GSSAPIAuthentication no
 UsePAM no
 
-# ── Restrict to customer user only ───────────────────────────────────────────
-AllowUsers www-data
-DenyUsers root gnukontrolr-admin webpanel-sys
+# ── Restrict allowed users ───────────────────────────────────────────────────
+# www-data:           customer SFTP (chrooted, no shell)
+# webuser:            domain customer SSH — real bash shell, web content access
+# gnukontrolr-admin:  superadmin full-shell SSH (key injected via panel API)
+AllowUsers www-data webuser gnukontrolr-admin
+DenyUsers root webpanel-sys
 
-# ── Customer chroot (SFTP only) ────────────────────────────────────────────
-# www-data is chrooted to /var/chroot — only /html and /customer are visible.
-# /var/config is NOT in the chroot and is never visible to SSH clients.
-# ForceCommand prevents shell access — SFTP file transfer only.
-Match User www-data
-    ChrootDirectory /var/chroot
-    ForceCommand internal-sftp -d /html -l INFO
-    X11Forwarding no
-    AllowTcpForwarding no
-    AllowAgentForwarding no
-    PermitTunnel no
-    Banner none
-
-# ── Network hardening ─────────────────────────────────────────────────────────
+# ── Network hardening (global — MUST be before any Match block) ──────────────
 MaxAuthTries 3
 MaxSessions 2
 LoginGraceTime 20
@@ -47,7 +35,7 @@ ClientAliveInterval 60
 ClientAliveCountMax 2
 TCPKeepAlive no
 
-# ── Features off ─────────────────────────────────────────────────────────────
+# ── Features off (global) ─────────────────────────────────────────────────────
 X11Forwarding no
 AllowTcpForwarding no
 AllowAgentForwarding no
@@ -65,3 +53,27 @@ KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org
 # ── Logging ──────────────────────────────────────────────────────────────────
 SyslogFacility AUTH
 LogLevel VERBOSE
+
+# ── Customer chroot (SFTP only) ──────────────────────────────────────────────
+Match User www-data
+    ChrootDirectory /var/chroot
+    ForceCommand internal-sftp -d /html -l INFO
+    Banner none
+
+# ── Domain customer SSH (real shell, web content only) ───────────────────────
+# webuser gets a real bash shell to run composer/wp-cli/npm.
+# No TCP forwarding — they are the domain owner, not an admin.
+Match User webuser
+    AllowTcpForwarding no
+    X11Forwarding no
+    Banner none
+
+# ── Superadmin full-shell access (MUST be last Match block) ──────────────────
+# gnukontrolr-admin gets a real shell + TCP forwarding for SSH tunnels.
+# Key is injected at runtime via POST /admin/ssh-key on the container API.
+Match User gnukontrolr-admin
+    AllowTcpForwarding yes
+    X11Forwarding no
+    PermitTunnel no
+    GatewayPorts no
+    Banner none

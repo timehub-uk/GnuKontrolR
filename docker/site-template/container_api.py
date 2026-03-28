@@ -487,8 +487,15 @@ def exec_command():
 # ══════════════════════════════════════════════════════════════════════════════
 
 APP_CACHE_DIR       = Path("/var/cache/gnukontrolr/apps")
+DOMAIN_TMP_DIR      = Path("/var/customer/tmp")   # per-domain tmp — real FS, not tmpfs
 INSTALLED_APPS_FILE = DB_DIR / "installed_apps.json"
-MYSQL_ROOT_PASS     = os.environ.get("MYSQL_ROOT_PASSWORD", "")
+_MYSQL_PASS_FILE    = DB_DIR / "mysql_root_pass"
+
+def _mysql_root_pass() -> str:
+    """Read the private MariaDB root password (written by entrypoint on first boot)."""
+    if _MYSQL_PASS_FILE.exists():
+        return _MYSQL_PASS_FILE.read_text().strip()
+    return os.environ.get("MYSQL_ROOT_PASSWORD", "")
 
 # In-memory job tracking (survives until container restart)
 _install_jobs: dict = {}
@@ -546,9 +553,11 @@ def _push(job_id: str, msg: str):
 
 
 def _mysql_exec(sql: str) -> tuple[bool, str]:
-    cmd = ["mysql", "-uroot", "--batch", "--silent"]
-    if MYSQL_ROOT_PASS:
-        cmd += [f"-p{MYSQL_ROOT_PASS}"]
+    """Execute SQL on the private local MariaDB instance via unix socket."""
+    root_pass = _mysql_root_pass()
+    cmd = ["mysql", "--socket=/var/run/mysqld/mysqld.sock", "-uroot", "--batch", "--silent"]
+    if root_pass:
+        cmd += [f"-p{root_pass}"]
     cmd += ["-e", sql]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     return r.returncode == 0, (r.stderr or r.stdout).strip()
@@ -618,8 +627,9 @@ def _install_wordpress(cfg: dict, job_id: str) -> dict:
 
     _push(job_id, "Extracting WordPress…")
     tgt = _target_dir(cfg.get("install_path", "/"))
-    with tempfile.TemporaryDirectory() as tmp:
-        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+    DOMAIN_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=str(DOMAIN_TMP_DIR)) as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
         wp_src = Path(tmp) / "wordpress"
         for item in wp_src.iterdir():
             dst = tgt / item.name
@@ -641,6 +651,7 @@ def _install_wordpress(cfg: dict, job_id: str) -> dict:
     for old, new in [("database_name_here", db_name), ("username_here", db_user),
                      ("password_here", db_pass)]:
         content = content.replace(old, new, 1)
+    # DB_HOST in wp-config stays as 'localhost' — MariaDB socket on same container
     # Replace placeholder security keys with random values
     for _ in range(8):
         content = content.replace("put your unique phrase here", _rand_str(64), 1)
@@ -677,7 +688,8 @@ def _install_joomla(cfg: dict, job_id: str) -> dict:
     tgt = _target_dir(cfg.get("install_path", "/"))
 
     _push(job_id, "Extracting Joomla…")
-    subprocess.run(["tar", "-xzf", str(archive), "-C", str(tgt)], check=True, timeout=60)
+    DOMAIN_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["tar", "-xzf", str(archive), "-C", str(tgt)], check=True, timeout=120)
 
     db_name, db_user, db_pass = cfg["db_name"], cfg["db_user"], cfg["db_pass"]
     _push(job_id, f"Creating database `{db_name}`…")
@@ -698,8 +710,9 @@ def _install_drupal(cfg: dict, job_id: str) -> dict:
     tgt = _target_dir(cfg.get("install_path", "/"))
 
     _push(job_id, "Extracting Drupal…")
-    with tempfile.TemporaryDirectory() as tmp:
-        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+    DOMAIN_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=str(DOMAIN_TMP_DIR)) as tmp:
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
         extracted = sorted(Path(tmp).iterdir())[0]  # drupal-10.x.y/
         for item in extracted.iterdir():
             dst = tgt / item.name
@@ -2089,6 +2102,107 @@ def sftp_revoke():
         subprocess.run(["userdel", "-r", SFTP_USER], check=False, timeout=10)
     for f in [SFTP_KEY_DIR / "id_ed25519", SFTP_KEY_DIR / "id_ed25519.pub", SFTP_INFO_FILE]:
         f.unlink(missing_ok=True)
+    return jsonify({"ok": True})
+
+
+# ── SSH key helpers (shared by webuser and admin endpoints) ───────────────────
+
+_VALID_KEY_TYPES = {
+    "ssh-rsa", "ssh-ed25519", "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com",
+}
+
+
+def _validate_ssh_pubkey(key: str) -> bool:
+    """Basic structural validation: must start with a known key type."""
+    parts = key.strip().split()
+    return len(parts) >= 2 and parts[0] in _VALID_KEY_TYPES
+
+
+# ── Domain customer (webuser) SSH key management ─────────────────────────────
+
+WEBUSER_SSH_DIR   = Path("/home/webuser/.ssh")
+WEBUSER_AUTH_KEYS = WEBUSER_SSH_DIR / "authorized_keys"
+
+
+@app.post("/webuser/ssh-key")
+def webuser_ssh_key():
+    """
+    Set the SSH public key for the domain customer (webuser).
+    webuser gets a real bash shell with access to /var/www/html and PHP tools.
+    Replaces any existing key (idempotent — call again to rotate).
+    """
+    _verify_token()
+    body = request.json or {}
+    key = (body.get("public_key") or "").strip()
+    if not key:
+        abort(400)
+    if not _validate_ssh_pubkey(key):
+        abort(400)
+
+    WEBUSER_SSH_DIR.mkdir(parents=True, exist_ok=True)
+    WEBUSER_SSH_DIR.chmod(0o700)
+    shutil.chown(str(WEBUSER_SSH_DIR), "webuser", "webuser")
+
+    WEBUSER_AUTH_KEYS.write_text(key + "\n")
+    WEBUSER_AUTH_KEYS.chmod(0o600)
+    shutil.chown(str(WEBUSER_AUTH_KEYS), "webuser", "webuser")
+
+    log.info("webuser SSH key set for domain %s", DOMAIN)
+    return jsonify({"ok": True, "domain": DOMAIN, "user": "webuser"})
+
+
+@app.delete("/webuser/ssh-key")
+def webuser_ssh_key_revoke():
+    """Remove the webuser SSH key."""
+    _verify_token()
+    if WEBUSER_AUTH_KEYS.exists():
+        WEBUSER_AUTH_KEYS.write_text("")
+    log.info("webuser SSH key revoked for domain %s", DOMAIN)
+    return jsonify({"ok": True})
+
+
+# ── Superadmin SSH key injection ──────────────────────────────────────────────
+
+ADMIN_SSH_DIR   = Path("/home/gnukontrolr-admin/.ssh")
+ADMIN_AUTH_KEYS = ADMIN_SSH_DIR / "authorized_keys"
+
+
+@app.post("/admin/ssh-key")
+def admin_ssh_key():
+    """
+    Inject a superadmin SSH public key into gnukontrolr-admin's authorized_keys.
+    Replaces all existing keys (idempotent — call again to rotate).
+    Only callable with a valid CONTAINER_API_TOKEN.
+    """
+    _verify_token()
+    body = request.json or {}
+    key = (body.get("public_key") or "").strip()
+    if not key:
+        abort(400)
+    if not _validate_ssh_pubkey(key):
+        abort(400)
+
+    ADMIN_SSH_DIR.mkdir(parents=True, exist_ok=True)
+    ADMIN_SSH_DIR.chmod(0o700)
+    shutil.chown(str(ADMIN_SSH_DIR), "gnukontrolr-admin", "gnukontrolr")
+
+    ADMIN_AUTH_KEYS.write_text(key + "\n")
+    ADMIN_AUTH_KEYS.chmod(0o600)
+    shutil.chown(str(ADMIN_AUTH_KEYS), "gnukontrolr-admin", "gnukontrolr")
+
+    log.info("Superadmin SSH key injected for domain %s", DOMAIN)
+    return jsonify({"ok": True, "domain": DOMAIN, "user": "gnukontrolr-admin"})
+
+
+@app.delete("/admin/ssh-key")
+def admin_ssh_key_revoke():
+    """Remove the superadmin SSH key — closes the admin SSH backdoor."""
+    _verify_token()
+    if ADMIN_AUTH_KEYS.exists():
+        ADMIN_AUTH_KEYS.write_text("")
+    log.info("Superadmin SSH key revoked for domain %s", DOMAIN)
     return jsonify({"ok": True})
 
 

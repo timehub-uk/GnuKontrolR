@@ -25,7 +25,12 @@ export function useLiveCheck(endpoint, { mode = 'ws', interval = 15000, enabled 
   const fetchPoll = useCallback(async () => {
     try {
       const r = await api.get(endpoint);
-      setChecks(r.data.checks || r.data || []);
+      // Guard: always set an array — r.data may be HTML string if endpoint is wrong
+      const raw = r.data;
+      const arr = Array.isArray(raw?.checks) ? raw.checks
+                : Array.isArray(raw) ? raw
+                : [];
+      setChecks(arr);
       setError(null);
     } catch (e) {
       setError(e?.response?.data?.detail || 'Check failed');
@@ -43,7 +48,10 @@ export function useLiveCheck(endpoint, { mode = 'ws', interval = 15000, enabled 
         onMessage: (data) => {
           try {
             const parsed = JSON.parse(data);
-            setChecks(parsed.checks || parsed || []);
+            const arr = Array.isArray(parsed?.checks) ? parsed.checks
+                      : Array.isArray(parsed) ? parsed
+                      : [];
+            setChecks(arr);
             setError(null);
           } catch {
             setChecks([]);

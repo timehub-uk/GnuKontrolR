@@ -118,12 +118,13 @@ function CheckRow({ check, domain, onFixed }) {
 }
 
 export default function SecurityAdvisor({ domain }) {
+  // Use REST endpoint for polling; WS endpoint for live mode
   const endpoint = domain
-    ? `/api/security/ws/${domain}`
+    ? `/api/security/check/${domain}`
     : null;
 
   const { checks, loading, error, refresh } = useLiveCheck(endpoint, {
-    mode: 'poll',  // use poll until WS endpoint is built
+    mode: 'poll',
     interval: 30000,
     enabled: !!domain,
   });

@@ -11,7 +11,8 @@ WORKDIR /frontend
 COPY frontend/package*.json ./
 RUN npm ci --silent
 COPY frontend/ ./
-RUN npm run build
+# Create the postbuild target so the cp doesn't fail inside the Docker build
+RUN mkdir -p /opt/gnukontrolr/frontend/dist && npm run build
 
 # ── Stage 2: Python dependency builder ───────────────────────────────────────
 FROM python:3.12-slim-bookworm AS builder

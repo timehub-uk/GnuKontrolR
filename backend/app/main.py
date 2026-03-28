@@ -3,6 +3,8 @@ import logging
 import os
 import time
 import uuid
+import asyncio
+import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,8 +21,26 @@ import psutil
 
 log = logging.getLogger("webpanel")
 
+# ── Debug level 5 → comprehensive.log ────────────────────────────────────────
+_DEBUG_LEVEL = int(os.environ.get("DEBUG_LEVEL", "0"))
+if _DEBUG_LEVEL >= 5:
+    _comp_handler = logging.FileHandler("/tmp/comprehensive.log", mode="a")
+    _comp_handler.setLevel(logging.DEBUG)
+    _comp_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s  %(message)s"
+    ))
+    # Capture everything: webpanel, sqlalchemy, httpx, uvicorn, fastapi
+    for _lg_name in ("webpanel", "sqlalchemy.engine", "httpx", "uvicorn", "fastapi"):
+        _lg = logging.getLogger(_lg_name)
+        _lg.setLevel(logging.DEBUG)
+        _lg.addHandler(_comp_handler)
+    logging.getLogger().setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(_comp_handler)
+    log.info("DEBUG_LEVEL=5: comprehensive logging active → /tmp/comprehensive.log")
+# ─────────────────────────────────────────────────────────────────────────────
+
 from app.database import init_db
-from app.routers import auth, users, domains, server, docker_mgr, services, admin_content, container_proxy, security, activity_log, marketplace, ai, ai_admin, terminal, system_logs, dns
+from app.routers import auth, users, domains, server, docker_mgr, services, admin_content, container_proxy, security, activity_log, marketplace, ai, ai_admin, terminal, system_logs, dns, dns_sync
 
 
 # Prometheus metrics
@@ -33,7 +53,14 @@ _disk_gauge  = Gauge("webpanel_host_disk_percent", "Host disk usage %")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Start DNS sync background task (reconciles DB ↔ PowerDNS every 180 s)
+    task = asyncio.create_task(dns_sync.dns_sync_loop(interval=180))
     yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(
@@ -104,6 +131,17 @@ async def _request_lifecycle(request: Request, call_next):
         response.status_code, elapsed_ms, event_id,
     )
 
+    if _DEBUG_LEVEL >= 5:
+        _qs = str(request.url.query)
+        log.debug(
+            "[D5] %s %s%s → %s [%sms] headers=%s event=%s",
+            request.method, request.url.path,
+            ("?" + _qs) if _qs else "",
+            response.status_code, elapsed_ms,
+            dict(request.headers),
+            event_id,
+        )
+
     # Write to per-user private activity log for authenticated API requests
     if request.url.path.startswith("/api/") and request.url.path != "/api/metrics":
         try:
@@ -142,6 +180,7 @@ app.include_router(ai_admin.router)
 app.include_router(terminal.router)
 app.include_router(system_logs.router)
 app.include_router(dns.router)
+app.include_router(dns_sync.router)
 
 
 @app.get("/api/metrics", include_in_schema=False)
@@ -168,6 +207,9 @@ if STATIC_DIR.exists():
         # actual API route gets a chance to match, rather than serving HTML.
         if full_path.startswith("api/") or full_path.startswith("ws/"):
             url = request.url
-            return RedirectResponse(str(url).rstrip("/") + "/", status_code=307)
+            url_str = str(url)
+            # Only redirect if the URL does NOT already end with "/" to prevent infinite redirect loops
+            if not url_str.endswith("/"):
+                return RedirectResponse(url_str + "/", status_code=307)
         index = STATIC_DIR / "index.html"
         return FileResponse(index)
