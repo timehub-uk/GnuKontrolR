@@ -4,24 +4,74 @@ import { toast } from 'sonner';
 import api from '../utils/api';
 import { fmtDate } from '../utils/dates';
 import DataTable from '../components/DataTable';
-import { Globe, Plus, Trash2, RefreshCw, ShieldCheck, Shield, RefreshCcw } from 'lucide-react';
+import { Globe, Plus, Trash2, RefreshCw, RefreshCcw } from 'lucide-react';
 
+// ── Status badge ──────────────────────────────────────────────────────────────
 const STATUS_BADGE = {
   active:    'bg-ok/15 text-ok-light border border-ok/25',
   suspended: 'bg-bad/15 text-bad-light border border-bad/25',
   pending:   'bg-warn/15 text-warn-light border border-warn/25',
 };
 
+// ── Service pill definitions ──────────────────────────────────────────────────
+const SERVICE_META = {
+  ssl:  { label: 'SSL',  title: 'HTTPS / TLS certificate' },
+  ssh:  { label: 'SSH',  title: 'SSH / SFTP access' },
+  web:  { label: 'Web',  title: 'Web server (container running)' },
+  dns:  { label: 'DNS',  title: 'DNS zone provisioned' },
+  smtp: { label: 'SMTP', title: 'Outbound mail relay (port 25/587)' },
+  imap: { label: 'IMAP', title: 'IMAP mail access (port 143/993)' },
+  pop3: { label: 'POP3', title: 'POP3 mail access (port 110/995)' },
+};
+
+// ── ServicePills ──────────────────────────────────────────────────────────────
+function ServicePills({ services = {} }) {
+  if (!services || Object.keys(services).length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap gap-1">
+      {Object.entries(SERVICE_META).map(([key, meta]) => {
+        const status = services[key];
+        if (!status) return null; // hidden = not installed / not applicable
+
+        const isOk = status === 'ok';
+        return (
+          <span
+            key={key}
+            title={`${meta.title} — ${isOk ? 'active' : 'issue detected'}`}
+            className={`
+              inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5
+              rounded-full border select-none whitespace-nowrap
+              ${isOk
+                ? 'bg-ok/10 border-ok/20 text-ok-light'
+                : 'bg-warn/10 border-warn/20 text-warn-light'}
+            `}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                isOk ? 'bg-ok' : 'bg-warn animate-pulse'
+              }`}
+            />
+            {meta.label}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Column helper ─────────────────────────────────────────────────────────────
 const col = createColumnHelper();
 
+// ── Page ──────────────────────────────────────────────────────────────────────
 export default function DomainsPage() {
-  const [domains,   setDomains]   = useState([]);
-  const [loading,   setLoading]   = useState(true);
-  const [form,      setForm]      = useState({ name: '', php_version: '8.2', domain_type: 'main' });
-  const [adding,    setAdding]    = useState(false);
-  const [showForm,  setShowForm]  = useState(false);
-  const [deleting,  setDeleting]  = useState(null); // domain id pending delete confirm
-  const [syncing,   setSyncing]   = useState(null); // domain name being DNS-synced
+  const [domains,  setDomains]  = useState([]);
+  const [loading,  setLoading]  = useState(true);
+  const [form,     setForm]     = useState({ name: '', php_version: '8.2', domain_type: 'main' });
+  const [adding,   setAdding]   = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [deleting, setDeleting] = useState(null);
+  const [syncing,  setSyncing]  = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -79,11 +129,15 @@ export default function DomainsPage() {
   const columns = useMemo(() => [
     col.accessor('name', {
       header: 'Domain',
-      cell: i => <span className="font-medium text-ink-primary">{i.getValue()}</span>,
+      cell: i => (
+        <span className="font-medium text-ink-primary">{i.getValue()}</span>
+      ),
     }),
     col.accessor('domain_type', {
       header: 'Type',
-      cell: i => <span className="text-ink-secondary capitalize">{i.getValue()}</span>,
+      cell: i => (
+        <span className="text-ink-secondary capitalize text-xs">{i.getValue()}</span>
+      ),
     }),
     col.accessor('status', {
       header: 'Status',
@@ -95,18 +149,20 @@ export default function DomainsPage() {
     }),
     col.accessor('php_version', {
       header: 'PHP',
-      cell: i => <span className="text-ink-muted">PHP {i.getValue()}</span>,
+      cell: i => (
+        <span className="text-ink-muted text-xs">PHP {i.getValue()}</span>
+      ),
     }),
-    col.accessor('ssl_enabled', {
-      header: 'SSL',
+    col.accessor('services', {
+      header: 'Services',
       enableSorting: false,
-      cell: i => i.getValue()
-        ? <ShieldCheck size={14} className="text-ok" />
-        : <Shield size={14} className="text-ink-muted/40" />,
+      cell: i => <ServicePills services={i.getValue()} />,
     }),
     col.accessor('created_at', {
       header: 'Created',
-      cell: i => <span className="text-ink-muted text-xs">{fmtDate(i.getValue())}</span>,
+      cell: i => (
+        <span className="text-ink-muted text-xs">{fmtDate(i.getValue())}</span>
+      ),
     }),
     col.display({
       id: 'actions',
@@ -131,7 +187,7 @@ export default function DomainsPage() {
         </div>
       ),
     }),
-  ], []);
+  ], [syncing]);
 
   return (
     <div className="space-y-5">
@@ -140,11 +196,27 @@ export default function DomainsPage() {
           <Globe size={20} /> Domains
         </h1>
         <div className="flex gap-2">
-          <button onClick={load} className="btn-ghost" disabled={loading}><RefreshCw size={14} className={loading ? 'animate-spin' : ''} /></button>
+          <button onClick={load} className="btn-ghost" disabled={loading}>
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          </button>
           <button onClick={() => setShowForm(s => !s)} className="btn-primary flex items-center gap-2">
             <Plus size={14} /> Add Domain
           </button>
         </div>
+      </div>
+
+      {/* Pill legend */}
+      <div className="flex flex-wrap items-center gap-3 text-[11px] text-ink-muted px-1">
+        <span className="font-medium text-ink-faint uppercase tracking-wide text-[10px]">Legend:</span>
+        <span className="inline-flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-ok" /> Active
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-warn animate-pulse" /> Issue
+        </span>
+        <span className="inline-flex items-center gap-1 opacity-40">
+          <span className="w-1.5 h-1.5 rounded-full bg-ink-muted" /> Hidden = not installed
+        </span>
       </div>
 
       {showForm && (

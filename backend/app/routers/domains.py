@@ -12,6 +12,7 @@ from datetime import datetime
 from app.database import get_db
 from app.dns_helper import deprovision_domain_dns, provision_domain_dns
 from app.models.domain import Domain, DomainType, DomainStatus
+from app.models.container_port import ContainerPort
 from app.models.user import User, Role
 from app.auth import get_current_user
 from app.routers.localdns import _localdns_sync
@@ -37,6 +38,38 @@ class DomainUpdate(BaseModel):
     doc_root: Optional[str] = None
 
 
+def _domain_services(domain: Domain, ssh_ports: set[str], running_names: set[str]) -> dict:
+    """Return per-service status: 'ok' | 'warn' | None (hidden).
+
+    Rules
+    -----
+    SSL/HTTPS  ok  = ssl_enabled is True (LE cert issued / valid)
+               warn = domain is active but ssl_enabled is False (pending / self-signed)
+    SSH/SFTP   ok  = ContainerPort row exists for this domain
+               warn = domain active but no SSH port assigned yet
+    Web/HTTP   ok  = container is running
+               warn = domain active but container not running
+    DNS        ok  = domain status == active  (zone provisioned on create)
+               warn = domain pending
+    SMTP       ok  = domain type in (main, addon, parked) and domain active
+    IMAP       same as SMTP (uses same mail stack)
+    POP3       same as SMTP
+    """
+    active = domain.status == DomainStatus.active
+    has_mail = domain.domain_type in (DomainType.main, DomainType.addon, DomainType.parked)
+    container_name = "site_" + domain.name.replace(".", "_").replace("-", "_")
+
+    return {
+        "ssl":   "ok"   if domain.ssl_enabled else ("warn" if active else None),
+        "ssh":   "ok"   if domain.name in ssh_ports else ("warn" if active else None),
+        "web":   "ok"   if container_name in running_names else ("warn" if active else None),
+        "dns":   "ok"   if active else ("warn" if domain.status == DomainStatus.pending else None),
+        "smtp":  ("ok"  if active else "warn") if has_mail else None,
+        "imap":  ("ok"  if active else "warn") if has_mail else None,
+        "pop3":  ("ok"  if active else "warn") if has_mail else None,
+    }
+
+
 @router.get("/")
 async def list_domains(db: AsyncSession = Depends(get_db), current: User = Depends(get_current_user)):
     if current.role in (Role.superadmin, Role.admin):
@@ -44,6 +77,22 @@ async def list_domains(db: AsyncSession = Depends(get_db), current: User = Depen
     else:
         result = await db.execute(select(Domain).where(Domain.owner_id == current.id))
     domains = result.scalars().all()
+
+    # Bulk-fetch SSH port assignments so we don't do N queries
+    port_rows = await db.execute(select(ContainerPort).where(ContainerPort.service == "ssh"))
+    ssh_ports: set[str] = {r.domain for r in port_rows.scalars().all()}
+
+    # Check which site containers are currently running (non-blocking, best-effort)
+    running_names: set[str] = set()
+    try:
+        import subprocess, json as _json
+        out = subprocess.check_output(
+            ["docker", "ps", "--format", "{{json .Names}}"], timeout=3
+        ).decode()
+        running_names = {line.strip().strip('"') for line in out.splitlines() if line.strip()}
+    except Exception:
+        pass
+
     return [
         {
             "id": d.id, "name": d.name, "owner_id": d.owner_id,
@@ -51,6 +100,7 @@ async def list_domains(db: AsyncSession = Depends(get_db), current: User = Depen
             "ssl_enabled": d.ssl_enabled, "ssl_expires": d.ssl_expires,
             "php_version": d.php_version, "doc_root": d.doc_root,
             "redirect_to": d.redirect_to, "acme_email": d.acme_email, "created_at": d.created_at,
+            "services": _domain_services(d, ssh_ports, running_names),
         }
         for d in domains
     ]
