@@ -64,14 +64,6 @@ const NAV_GROUPS = [
     ],
   },
   {
-    label: 'Infrastructure',
-    items: [
-      { to: '/networking',     icon: Network,     label: 'Networking',     adminOnly: true },
-      { to: '/ai-containers',  icon: Bot,         label: 'AI Containers',  adminOnly: true },
-      { to: '/ai-admin',       icon: BrainCircuit, label: 'AI Admin',      adminOnly: true },
-    ],
-  },
-  {
     label: 'Security',
     items: [
       { to: '/security',      icon: Shield,   label: 'Security'      },
