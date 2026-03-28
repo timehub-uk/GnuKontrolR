@@ -30,7 +30,7 @@ entryPoints:
 certificatesResolvers:
   le:
     acme:
-      email: "${ACME_EMAIL:-admin@example.com}"
+      email: "ssl@example.com"  # overridden by TRAEFIK_CERTIFICATESRESOLVERS_LE_ACME_EMAIL env var
       storage: /certs/acme.json
       httpChallenge:
         entryPoint: web

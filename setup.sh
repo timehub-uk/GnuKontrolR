@@ -475,9 +475,11 @@ cmd_stop() {
 
 cmd_restart() {
   require_env
-  info "Restarting services..."
-  dc restart
-  ok "Restarted"
+  info "Applying config changes and restarting services..."
+  # Use 'up -d' rather than 'restart' so compose detects any config/env changes
+  # and recreates only the containers whose config changed.
+  dc up -d --remove-orphans
+  ok "Services up-to-date"
   cmd_status
 }
 

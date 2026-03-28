@@ -63,6 +63,9 @@ services:
     image: traefik:v3.3
     container_name: webpanel_traefik
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     networks:
       - webpanel_net
     ports:
@@ -84,7 +87,11 @@ services:
       - traefik.http.routers.traefik-dash.service=api@internal
     environment:
       - TZ=${TZ:-UTC}
-      - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
+      - ACME_EMAIL=${ACME_EMAIL}
+      # Traefik native env var — overrides the static config value for ACME email.
+      # This allows updating ACME_EMAIL in .env + docker compose up -d without
+      # editing traefik.yml directly.
+      - TRAEFIK_CERTIFICATESRESOLVERS_LE_ACME_EMAIL=${ACME_EMAIL}
     depends_on:
       - docker-api-proxy
 
