@@ -149,6 +149,11 @@ export const IconCpu = I(<>
   <line x1="1" y1="14" x2="4" y2="14"/>
 </>);
 
+export const IconBrain = I(<>
+  <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/>
+  <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/>
+</>);
+
 // ── Menu definition (with description + details for info cards) ───────────────
 
 const MENU = [
@@ -200,6 +205,18 @@ const MENU = [
         to: '/networking', icon: IconNetwork, label: 'Networking',
         description: 'IP blocking, firewall, country geo-blocking.',
         details: 'Manage IP ban lists, per-domain country blocking with flag-based country selector, firewall rules, and the full API endpoint reference. Master IPs (Docker bridge + server external) are always whitelisted.',
+        adminOnly: true,
+      },
+      {
+        to: '/ai-admin', icon: IconBrain, label: 'AI Admin',
+        description: 'Configure AI providers and LLM settings.',
+        details: 'Set up and manage AI provider API keys (Anthropic, OpenAI, Ollama, OpenCode). Configure default models, enable or disable the AI assistant panel-wide, and review AI usage per user.',
+        adminOnly: true,
+      },
+      {
+        to: '/ai-containers', icon: IconCpu, label: 'AI Containers',
+        description: 'Manage dedicated per-user AI containers.',
+        details: 'View, stop, and remove the isolated Docker containers provisioned per user for AI tool sessions. Containers are named ai-{tool}-{user}-{id} and created automatically on first AI session.',
         adminOnly: true,
       },
       {
