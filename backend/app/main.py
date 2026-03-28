@@ -99,13 +99,17 @@ async def lifespan(app: FastAPI):
     await init_db()
     await _sync_acme_email()
     # Start DNS sync background task (reconciles DB ↔ PowerDNS every 180 s)
-    task = asyncio.create_task(dns_sync.dns_sync_loop(interval=180))
+    task     = asyncio.create_task(dns_sync.dns_sync_loop(interval=180))
+    # Start NS IP sync background task (updates NS1/NS2/NS3 records every 3600 s)
+    ns_task  = asyncio.create_task(dns_sync.ns_ip_sync_loop(interval=3600))
     yield
     task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    ns_task.cancel()
+    for t in (task, ns_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(

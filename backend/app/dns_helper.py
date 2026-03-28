@@ -391,6 +391,138 @@ async def register_vdns(domain: str, subdomain: str, server_ip: str = "") -> str
     return fqdn
 
 
+def _ns_rrset(domain: str, nameservers: list[str], ttl: int = 86400) -> dict:
+    """Build a NS rrset for a zone."""
+    return {
+        "name": _z(domain),
+        "type": "NS",
+        "ttl": ttl,
+        "changetype": "REPLACE",
+        "records": [{"content": _z(ns), "disabled": False} for ns in nameservers],
+    }
+
+
+async def get_external_ip() -> str:
+    """Detect the server's external IP via a public IP echo service.
+
+    Falls back to SERVER_IP env var if the request fails.
+    """
+    services = [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://ipecho.net/plain",
+    ]
+    for url in services:
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get(url, headers={"Accept": "text/plain"})
+                if r.status_code == 200:
+                    ip = r.text.strip()
+                    if ip:
+                        return ip
+        except Exception:
+            continue
+    return SERVER_IP
+
+
+async def sync_zone_ns(domain_name: str, ip: str) -> bool:
+    """Upsert NS records and glue A records for *domain_name* pointing to *ip*.
+
+    Each zone gets 5 NS records:
+      ns1/ns2/ns3.{PANEL_DOMAIN}  — master nameservers (shared, hosted on this server)
+      ns1/ns2.{domain_name}       — domain-specific nameservers
+
+    A records (glue) are written inside each zone for the domain-specific NS:
+      ns1.{domain_name} → ip
+      ns2.{domain_name} → ip
+
+    Master NS glue (ns1-3.{PANEL_DOMAIN}) is maintained in the panel's own zone
+    by sync_panel_ns_zone().
+
+    The zone must already exist. Returns True on success.
+    """
+    panel_domain = PANEL_DOMAIN or domain_name  # fallback: use domain itself as master
+    master_ns = [
+        f"ns1.{panel_domain}",
+        f"ns2.{panel_domain}",
+        f"ns3.{panel_domain}",
+    ]
+    domain_ns1, domain_ns2 = f"ns1.{domain_name}", f"ns2.{domain_name}"
+
+    # All NS records: 3 master + 2 domain-specific
+    all_ns = master_ns + [domain_ns1, domain_ns2]
+
+    zone = _z(domain_name)
+    rrsets = [
+        # Domain-specific glue A records inside this zone
+        _a(domain_ns1, ip, ttl=86400),
+        _a(domain_ns2, ip, ttl=86400),
+        # NS rrset for the zone
+        _ns_rrset(domain_name, all_ns),
+    ]
+    async with panel_client(timeout=10) as client:
+        try:
+            resp = await client.patch(
+                f"{PDNS_BASE}/zones/{zone}",
+                headers=_HEADERS,
+                json={"rrsets": rrsets},
+            )
+            if resp.status_code not in (200, 204):
+                resp.raise_for_status()
+            log.info("NS sync: %s → %d NS records → %s", domain_name, len(all_ns), ip)
+            return True
+        except httpx.HTTPError as exc:
+            log.error("NS sync failed for %s: %s", domain_name, exc)
+            return False
+
+
+async def sync_panel_ns_zone(ip: str) -> bool:
+    """Ensure ns1/ns2/ns3.{PANEL_DOMAIN} A records exist in the panel's own zone.
+
+    These are the shared master nameserver glue records that all customer domains
+    reference in their NS rrsets.
+    """
+    if not PANEL_DOMAIN:
+        return False
+    zone = _z(PANEL_DOMAIN)
+    rrsets = [
+        _a(f"ns1.{PANEL_DOMAIN}", ip, ttl=86400),
+        _a(f"ns2.{PANEL_DOMAIN}", ip, ttl=86400),
+        _a(f"ns3.{PANEL_DOMAIN}", ip, ttl=86400),
+    ]
+    async with panel_client(timeout=10) as client:
+        await _ensure_zone(client, zone)
+        try:
+            resp = await client.patch(
+                f"{PDNS_BASE}/zones/{zone}",
+                headers=_HEADERS,
+                json={"rrsets": rrsets},
+            )
+            if resp.status_code not in (200, 204):
+                resp.raise_for_status()
+            log.info("Panel NS glue synced: ns1-3.%s → %s", PANEL_DOMAIN, ip)
+            return True
+        except httpx.HTTPError as exc:
+            log.error("Panel NS glue sync failed: %s", exc)
+            return False
+
+
+async def sync_all_ns(domains: list["Domain"], ip: str = "") -> dict:
+    """Update NS1/NS2/NS3 records for every domain zone with *ip*.
+
+    Returns {"updated": [...], "errors": [...]}
+    """
+    server_ip = ip or SERVER_IP
+    if not server_ip:
+        return {"updated": [], "errors": ["SERVER_IP not set"]}
+    updated: list[str] = []
+    errors:  list[str] = []
+    for domain in domains:
+        ok = await sync_zone_ns(domain.name, server_ip)
+        (updated if ok else errors).append(domain.name)
+    return {"updated": updated, "errors": errors, "ip": server_ip}
+
+
 async def sync_all_domains(domains: list["Domain"], server_ip: str = "") -> dict:
     """Reconcile PowerDNS against the full list of domains from the DB.
 

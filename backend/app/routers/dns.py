@@ -1,9 +1,10 @@
+import asyncio
 import os
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from app.auth import require_admin
+from app.auth import require_admin, get_current_user
 
 router = APIRouter(prefix="/api/dns", tags=["dns"])
 
@@ -42,6 +43,9 @@ class RecordRequest(BaseModel):
     type: str
     content: str
     ttl: int = 300
+
+class ZoneKindRequest(BaseModel):
+    kind: str   # 'Native' | 'Master' | 'Slave'
 
 
 @router.get("/zones")
@@ -110,6 +114,45 @@ async def create_zone(zone: str, user=Depends(require_admin)):
     }
     try:
         return await pdns_post("/zones", payload)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"PowerDNS error: {e}")
+
+
+async def _dig(domain: str, record_type: str) -> list[str]:
+    """Run a dig query against 8.8.8.8, return list of answer strings."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "dig", "+short", "+time=3", "+tries=2",
+            domain, record_type, "@8.8.8.8",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+        lines = [l.strip().rstrip(".") for l in stdout.decode().splitlines() if l.strip()]
+        return lines
+    except Exception:
+        return []
+
+
+@router.get("/lookup/{domain}")
+async def external_lookup(domain: str, user=Depends(get_current_user)):
+    """Public DNS lookup for a domain — A, NS, MX records via 8.8.8.8."""
+    a_task  = asyncio.create_task(_dig(domain, "A"))
+    ns_task = asyncio.create_task(_dig(domain, "NS"))
+    mx_task = asyncio.create_task(_dig(domain, "MX"))
+    a, ns, mx = await asyncio.gather(a_task, ns_task, mx_task)
+    return {"domain": domain, "A": a, "NS": ns, "MX": mx}
+
+
+@router.patch("/zones/{zone}/kind")
+async def set_zone_kind(zone: str, req: ZoneKindRequest, user=Depends(require_admin)):
+    """Switch a zone between Native / Master / Slave."""
+    allowed = {"Native", "Master", "Slave"}
+    if req.kind not in allowed:
+        raise HTTPException(400, f"kind must be one of {allowed}")
+    zone_id = zone if zone.endswith(".") else zone + "."
+    try:
+        return await pdns_patch(f"/zones/{zone_id}", {"kind": req.kind})
     except httpx.HTTPError as e:
         raise HTTPException(502, f"PowerDNS error: {e}")
 
