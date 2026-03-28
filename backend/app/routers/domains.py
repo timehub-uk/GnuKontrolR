@@ -589,6 +589,29 @@ async def _recreate_container_for_domain(domain_name: str, php_version: str, db)
         log.error("Container recreate error for %s: %s", domain_name, exc)
 
 
+@router.post("/{domain_id}/reset-dns", status_code=200)
+async def reset_domain_dns(
+    domain_id: int,
+    db: AsyncSession = Depends(get_db),
+    current: User = Depends(get_current_user),
+):
+    """Delete and re-provision the PowerDNS zone from scratch.
+
+    All existing records are wiped and replaced with the canonical set
+    (NS, glue, A, MX, service CNAMEs, SPF, DKIM, DMARC, MTA-STS, CAA).
+    """
+    result = await db.execute(select(Domain).where(Domain.id == domain_id))
+    domain = result.scalar_one_or_none()
+    if not domain:
+        raise HTTPException(404, "Domain not found")
+    if domain.owner_id != current.id and current.role not in (Role.superadmin, Role.admin):
+        raise HTTPException(403, "Access denied")
+    # Wipe existing zone then re-provision from scratch
+    await deprovision_domain_dns(domain.name)
+    await provision_domain_dns(domain)
+    return {"ok": True, "domain": domain.name}
+
+
 @router.delete("/{domain_id}", status_code=204)
 async def delete_domain(domain_id: int, db: AsyncSession = Depends(get_db), current: User = Depends(get_current_user)):
     result = await db.execute(select(Domain).where(Domain.id == domain_id))

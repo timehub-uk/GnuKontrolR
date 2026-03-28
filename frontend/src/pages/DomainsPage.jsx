@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import api from '../utils/api';
 import { fmtDate } from '../utils/dates';
 import DataTable from '../components/DataTable';
-import { Globe, Plus, Trash2, RefreshCw, RefreshCcw } from 'lucide-react';
+import { Globe, Plus, Trash2, RefreshCw, RefreshCcw, RotateCcw } from 'lucide-react';
 
 // ── Status badge ──────────────────────────────────────────────────────────────
 const STATUS_BADGE = {
@@ -32,7 +32,7 @@ function ServicePills({ services = {} }) {
     <div className="flex flex-wrap gap-1">
       {Object.entries(SERVICE_META).map(([key, meta]) => {
         const status = services[key];
-        if (!status) return null; // hidden = not installed / not applicable
+        if (!status) return null;
 
         const isOk = status === 'ok';
         return (
@@ -60,18 +60,74 @@ function ServicePills({ services = {} }) {
   );
 }
 
+// ── Reset DNS dialog ──────────────────────────────────────────────────────────
+function ResetDnsDialog({ domain, onConfirm, onCancel, resetting }) {
+  const [unlocked, setUnlocked] = useState(false);
+
+  return (
+    <div className="card border-warn/30 bg-warn/5 space-y-4">
+      <div>
+        <p className="text-sm font-semibold text-ink-primary mb-1">
+          Reset DNS for <span className="text-warn-light font-mono">{domain?.name}</span>?
+        </p>
+        <p className="text-xs text-ink-muted">
+          This wipes the entire PowerDNS zone and rebuilds it from scratch with
+          NS, glue, A, MX, service CNAMEs (imap/smtp/pop/sftp), SPF, DKIM,
+          DMARC, MTA-STS, TLS-RPT and CAA records. Existing custom records will
+          be lost. This cannot be undone.
+        </p>
+      </div>
+
+      {/* Unlock slider */}
+      <div className="flex items-center gap-3">
+        <label className="relative inline-flex items-center cursor-pointer">
+          <input
+            type="checkbox"
+            checked={unlocked}
+            onChange={e => setUnlocked(e.target.checked)}
+            className="sr-only peer"
+          />
+          <div className={`
+            w-11 h-6 rounded-full peer transition-colors
+            after:content-[''] after:absolute after:top-[2px] after:left-[2px]
+            after:bg-white after:rounded-full after:h-5 after:w-5
+            after:transition-all peer-checked:after:translate-x-full
+            ${unlocked ? 'bg-warn' : 'bg-panel-border'}
+          `} />
+        </label>
+        <span className="text-xs text-ink-muted">
+          {unlocked ? 'Unlocked — ready to reset' : 'Slide to unlock reset'}
+        </span>
+      </div>
+
+      <div className="flex gap-2">
+        <button
+          onClick={() => onConfirm(domain.id)}
+          disabled={!unlocked || resetting}
+          className="btn-primary bg-warn hover:bg-warn/80 border-warn/50 text-xs px-3 py-1.5 disabled:opacity-40"
+        >
+          {resetting ? 'Resetting…' : 'Reset DNS'}
+        </button>
+        <button onClick={onCancel} className="btn-ghost text-xs px-3 py-1.5">Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 // ── Column helper ─────────────────────────────────────────────────────────────
 const col = createColumnHelper();
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 export default function DomainsPage() {
-  const [domains,  setDomains]  = useState([]);
-  const [loading,  setLoading]  = useState(true);
-  const [form,     setForm]     = useState({ name: '', php_version: '8.2', domain_type: 'main' });
-  const [adding,   setAdding]   = useState(false);
-  const [showForm, setShowForm] = useState(false);
-  const [deleting, setDeleting] = useState(null);
-  const [syncing,  setSyncing]  = useState(null);
+  const [domains,      setDomains]      = useState([]);
+  const [loading,      setLoading]      = useState(true);
+  const [form,         setForm]         = useState({ name: '', php_version: '8.2', domain_type: 'main' });
+  const [adding,       setAdding]       = useState(false);
+  const [showForm,     setShowForm]     = useState(false);
+  const [deleting,     setDeleting]     = useState(null);
+  const [syncing,      setSyncing]      = useState(null);
+  const [resetTarget,  setResetTarget]  = useState(null);   // domain object
+  const [resetting,    setResetting]    = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -123,6 +179,20 @@ export default function DomainsPage() {
       load();
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Delete failed');
+    }
+  };
+
+  const confirmResetDns = async id => {
+    setResetting(true);
+    try {
+      await api.post(`/api/domains/${id}/reset-dns`);
+      toast.success(`DNS reset for ${resetTarget?.name}`);
+      setResetTarget(null);
+      await load();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'DNS reset failed');
+    } finally {
+      setResetting(false);
     }
   };
 
@@ -178,7 +248,14 @@ export default function DomainsPage() {
             <RefreshCcw size={13} className={syncing === row.original.name ? 'animate-spin' : ''} />
           </button>
           <button
-            onClick={() => setDeleting(row.original.id)}
+            onClick={() => { setResetTarget(row.original); setDeleting(null); }}
+            className="text-ink-muted hover:text-warn-light transition-colors p-1 rounded"
+            title="Reset DNS to default"
+          >
+            <RotateCcw size={13} />
+          </button>
+          <button
+            onClick={() => { setDeleting(row.original.id); setResetTarget(null); }}
             className="text-ink-muted hover:text-bad transition-colors p-1 rounded"
             title="Delete domain"
           >
@@ -245,6 +322,16 @@ export default function DomainsPage() {
             </div>
           </form>
         </div>
+      )}
+
+      {/* Reset DNS dialog */}
+      {resetTarget && (
+        <ResetDnsDialog
+          domain={resetTarget}
+          onConfirm={confirmResetDns}
+          onCancel={() => setResetTarget(null)}
+          resetting={resetting}
+        />
       )}
 
       {/* Delete confirm */}

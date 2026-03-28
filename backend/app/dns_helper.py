@@ -133,11 +133,15 @@ def _update_opendkim_tables(domain: str) -> None:
     signing_table = DKIM_KEYS_DIR / "signing.table"
     key_table     = DKIM_KEYS_DIR / "key.table"
 
-    # Collect all domains that have keys
-    domains_with_keys = sorted(
-        d.name for d in DKIM_KEYS_DIR.iterdir()
-        if d.is_dir() and (d / "mail.private").exists()
-    )
+    try:
+        # Collect all domains that have keys
+        domains_with_keys = sorted(
+            d.name for d in DKIM_KEYS_DIR.iterdir()
+            if d.is_dir() and (d / "mail.private").exists()
+        )
+    except OSError as exc:
+        log.warning("Could not read DKIM keys directory %s: %s", DKIM_KEYS_DIR, exc)
+        return
 
     signing_lines = [f"*@{d} {DKIM_SELECTOR}._domainkey.{d}\n" for d in domains_with_keys]
     key_lines = [
@@ -186,6 +190,17 @@ def _z(name: str) -> str:
     return name.rstrip(".") + "."
 
 
+def _ns_rrset(domain: str, nameservers: list[str], ttl: int = 86400) -> dict:
+    """Build a NS rrset for a zone."""
+    return {
+        "name": _z(domain),
+        "type": "NS",
+        "ttl": ttl,
+        "changetype": "REPLACE",
+        "records": [{"content": _z(ns), "disabled": False} for ns in nameservers],
+    }
+
+
 def _a(name: str, ip: str, ttl: int = 300) -> dict:
     return {
         "name": _z(name),
@@ -216,16 +231,56 @@ def _txt(name: str, value: str, ttl: int = 300) -> dict:
     }
 
 
+def _cname(name: str, target: str, ttl: int = 300) -> dict:
+    return {
+        "name": _z(name),
+        "type": "CNAME",
+        "ttl": ttl,
+        "changetype": "REPLACE",
+        "records": [{"content": _z(target), "disabled": False}],
+    }
+
+
+def _caa(domain: str, tag: str, value: str, flag: int = 0, ttl: int = 3600) -> dict:
+    return {
+        "name": _z(domain),
+        "type": "CAA",
+        "ttl": ttl,
+        "changetype": "REPLACE",
+        "records": [{"content": f'{flag} {tag} "{value}"', "disabled": False}],
+    }
+
+
 def _build_rrsets(domain: "Domain", ip: str, mail_host: str) -> list[dict]:
     """Return the canonical rrsets for a domain based on its type.
 
-    DKIM records are generated/read here; keys are never replaced unless
-    forced by an admin.
+    Record order:
+      1. NS  (zone delegation — must be first for resolvers)
+      2. NS glue A records (ns1/ns2 inside this zone)
+      3. Apex A + www A
+      4. Mail A + MX
+      5. Service CNAMEs (imap/smtp/pop/sftp)
+      6. Email security TXT (SPF, DKIM, DMARC, MTA-STS, TLS-RPT)
+      7. CAA (certificate authority authorisation)
+
+    DKIM keys are generated once and never replaced unless forced by an admin.
     """
     from app.models.domain import DomainType
 
     name   = domain.name
     rrsets: list[dict] = []
+
+    # ── NS records — every zone type needs these ───────────────────────────
+    panel_domain = PANEL_DOMAIN or name
+    domain_ns1   = f"ns1.{name}"
+    domain_ns2   = f"ns2.{name}"
+    master_ns    = [f"ns1.{panel_domain}", f"ns2.{panel_domain}", f"ns3.{panel_domain}"]
+    # Deduplicate while preserving order (handles PANEL_DOMAIN == domain.name)
+    all_ns = list(dict.fromkeys(master_ns + [domain_ns1, domain_ns2]))
+    rrsets.append(_ns_rrset(name, all_ns))
+    # Glue A records for the domain-specific NS entries
+    rrsets.append(_a(domain_ns1, ip, ttl=86400))
+    rrsets.append(_a(domain_ns2, ip, ttl=86400))
 
     if domain.domain_type == DomainType.subdomain:
         # Subdomains only get an A record — mail/DKIM is on the parent
@@ -238,20 +293,46 @@ def _build_rrsets(domain: "Domain", ip: str, mail_host: str) -> list[dict]:
         if mail_host:
             rrsets.append(_a(f"mail.{name}", ip))
             rrsets.append(_mx(name, mail_host))
-            # SPF: authorise this server + the designated mail host
-            rrsets.append(_txt(name, f"v=spf1 a mx ip4:{ip} ~all"))
+
+            # ── Service CNAMEs ─────────────────────────────────────────────
+            # imap/smtp/pop → mail.{name}   sftp → {name}
+            rrsets.append(_cname(f"imap.{name}",  f"mail.{name}"))
+            rrsets.append(_cname(f"smtp.{name}",  f"mail.{name}"))
+            rrsets.append(_cname(f"pop.{name}",   f"mail.{name}"))
+            rrsets.append(_cname(f"sftp.{name}",  name))
+
+            # ── Email security TXT records ─────────────────────────────────
+            # SPF: authorise this server IP + the designated mail host
+            rrsets.append(_txt(name, f"v=spf1 a mx ip4:{ip} include:{panel_domain} ~all"))
+
             # DMARC
             rrsets.append(_txt(
                 f"_dmarc.{name}",
                 f"v=DMARC1; p=quarantine; rua=mailto:dmarc@{name}; ruf=mailto:dmarc@{name}; fo=1",
                 ttl=3600,
             ))
+
             # DKIM — generate key once; immutable unless admin forces rotation
             try:
                 pub_b64 = generate_dkim_keypair(name, force=False)
                 rrsets.append(_dkim_txt_record(name, pub_b64))
             except Exception as exc:
                 log.error("DKIM key generation failed for %s: %s", name, exc)
+
+            # MTA-STS: advertise that this server supports SMTP TLS
+            rrsets.append(_txt(f"_mta-sts.{name}", "v=STSv1; id=1", ttl=3600))
+
+            # SMTP TLS reporting
+            rrsets.append(_txt(
+                f"_smtp._tls.{name}",
+                f"v=TLSRPTv1; rua=mailto:tlsrpt@{name}",
+                ttl=3600,
+            ))
+
+        # ── CAA — only allow Let's Encrypt to issue certificates ──────────
+        rrsets.append(_caa(name, "issue",     "letsencrypt.org"))
+        rrsets.append(_caa(name, "issuewild", "letsencrypt.org"))
+        rrsets.append(_caa(name, "iodef",     f"mailto:ssl@{name}"))
 
     elif domain.domain_type == DomainType.redirect:
         rrsets.append(_a(name, ip))
@@ -262,23 +343,96 @@ def _build_rrsets(domain: "Domain", ip: str, mail_host: str) -> list[dict]:
 
 # ── Zone management ───────────────────────────────────────────────────────────
 
-async def _ensure_zone(client: httpx.AsyncClient, zone: str) -> bool:
-    """Create zone if it does not exist.  Returns True on success."""
-    try:
-        resp = await client.get(f"{PDNS_BASE}/zones/{zone}", headers=_HEADERS)
-        if resp.status_code == 404:
-            cr = await client.post(
-                f"{PDNS_BASE}/zones",
-                headers=_HEADERS,
-                json={"name": zone, "kind": "Native", "nameservers": [], "rrsets": []},
-            )
-            cr.raise_for_status()
-        elif resp.status_code not in (200, 204):
+async def _pdns_patch_with_retry(
+    client: httpx.AsyncClient,
+    zone: str,
+    rrsets: list[dict],
+    retries: int = 2,
+) -> bool:
+    """PATCH rrsets into a zone, retrying on transient errors.
+
+    On a 422 Unprocessable Entity (malformed rrset), logs the offending
+    rrset and skips it so the rest still apply.  Returns True if all
+    records were written without error.
+    """
+    url = f"{PDNS_BASE}/zones/{zone}"
+    for attempt in range(retries + 1):
+        try:
+            resp = await client.patch(url, headers=_HEADERS, json={"rrsets": rrsets})
+            if resp.status_code in (200, 204):
+                return True
+            if resp.status_code == 422:
+                # PowerDNS validation error — try records one by one to isolate the bad one
+                log.warning("PowerDNS 422 on bulk patch for %s — isolating bad records", zone)
+                ok_count = 0
+                for rrset in rrsets:
+                    try:
+                        r2 = await client.patch(url, headers=_HEADERS, json={"rrsets": [rrset]})
+                        if r2.status_code in (200, 204):
+                            ok_count += 1
+                        else:
+                            log.error(
+                                "Bad rrset skipped for %s: type=%s name=%s — %s",
+                                zone, rrset.get("type"), rrset.get("name"), r2.text[:200],
+                            )
+                    except httpx.HTTPError as e2:
+                        log.error("rrset patch error for %s %s: %s", zone, rrset.get("name"), e2)
+                return ok_count > 0
+            # 5xx — retry
+            if resp.status_code >= 500 and attempt < retries:
+                import asyncio as _asyncio
+                await _asyncio.sleep(1.5 ** attempt)
+                continue
             resp.raise_for_status()
-        return True
-    except httpx.HTTPError as exc:
-        log.error("PowerDNS zone ensure failed for %s: %s", zone, exc)
-        return False
+        except httpx.TimeoutException:
+            if attempt < retries:
+                import asyncio as _asyncio
+                log.warning("PowerDNS timeout patching %s (attempt %d/%d)", zone, attempt + 1, retries + 1)
+                await _asyncio.sleep(2)
+                continue
+            log.error("PowerDNS timeout patching %s after %d retries", zone, retries)
+            return False
+        except httpx.HTTPError as exc:
+            log.error("PowerDNS patch failed for %s: %s", zone, exc)
+            return False
+    return False
+
+
+async def _ensure_zone(client: httpx.AsyncClient, zone: str) -> bool:
+    """Create zone if it does not exist.  Retries once on transient errors.
+
+    Returns True on success.
+    """
+    for attempt in range(2):
+        try:
+            resp = await client.get(f"{PDNS_BASE}/zones/{zone}", headers=_HEADERS)
+            if resp.status_code == 404:
+                cr = await client.post(
+                    f"{PDNS_BASE}/zones",
+                    headers=_HEADERS,
+                    json={"name": zone, "kind": "Native", "nameservers": [], "rrsets": []},
+                )
+                if cr.status_code in (200, 201, 204, 422):
+                    # 422 here = zone already exists (race condition) — that's fine
+                    return True
+                cr.raise_for_status()
+            elif resp.status_code in (200, 204):
+                return True
+            else:
+                resp.raise_for_status()
+            return True
+        except httpx.TimeoutException:
+            if attempt == 0:
+                import asyncio as _asyncio
+                log.warning("PowerDNS timeout checking zone %s — retrying", zone)
+                await _asyncio.sleep(1)
+                continue
+            log.error("PowerDNS timeout ensuring zone %s", zone)
+            return False
+        except httpx.HTTPError as exc:
+            log.error("PowerDNS zone ensure failed for %s: %s", zone, exc)
+            return False
+    return False
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -286,8 +440,11 @@ async def _ensure_zone(client: httpx.AsyncClient, zone: str) -> bool:
 async def provision_domain_dns(domain: "Domain", server_ip: str = "") -> None:
     """Create or fully replace the PowerDNS zone for *domain*.
 
-    DKIM keys are generated once and never replaced automatically.
-    Called after a domain is created or updated in the DB.
+    Provisions in order: zone creation → NS + glue + A + MX + service CNAMEs
+    + email security TXT (SPF/DKIM/DMARC/MTA-STS/TLS-RPT) + CAA.
+
+    Also ensures the panel NS glue zone is up to date so all new domains
+    immediately have working NS delegation.
     """
     ip = server_ip or SERVER_IP
     if not ip:
@@ -301,19 +458,20 @@ async def provision_domain_dns(domain: "Domain", server_ip: str = "") -> None:
     if not rrsets:
         return
 
-    async with panel_client(timeout=10) as client:
+    async with panel_client(timeout=15) as client:
         if not await _ensure_zone(client, zone):
+            log.error("DNS provisioning aborted for %s — zone ensure failed", domain.name)
             return
-        try:
-            resp = await client.patch(
-                f"{PDNS_BASE}/zones/{zone}",
-                headers=_HEADERS,
-                json={"rrsets": rrsets},
-            )
-            resp.raise_for_status()
-            log.info("DNS provisioned: %s → %s (%s)", domain.name, ip, domain.domain_type)
-        except httpx.HTTPError as exc:
-            log.error("PowerDNS rrset upsert failed for %s: %s", domain.name, exc)
+        ok = await _pdns_patch_with_retry(client, zone, rrsets)
+        if ok:
+            log.info("DNS provisioned: %s → %s (%s) [%d rrsets]",
+                     domain.name, ip, domain.domain_type, len(rrsets))
+        else:
+            log.error("DNS provisioning incomplete for %s — some records may be missing", domain.name)
+            return
+
+    # Ensure the panel's own NS glue zone is current so the delegation resolves
+    await sync_panel_ns_zone(ip)
 
 
 async def rotate_dkim_key(domain: "Domain") -> str:
@@ -391,17 +549,6 @@ async def register_vdns(domain: str, subdomain: str, server_ip: str = "") -> str
     return fqdn
 
 
-def _ns_rrset(domain: str, nameservers: list[str], ttl: int = 86400) -> dict:
-    """Build a NS rrset for a zone."""
-    return {
-        "name": _z(domain),
-        "type": "NS",
-        "ttl": ttl,
-        "changetype": "REPLACE",
-        "records": [{"content": _z(ns), "disabled": False} for ns in nameservers],
-    }
-
-
 async def get_external_ip() -> str:
     """Detect the server's external IP via a public IP echo service.
 
@@ -442,15 +589,11 @@ async def sync_zone_ns(domain_name: str, ip: str) -> bool:
     The zone must already exist. Returns True on success.
     """
     panel_domain = PANEL_DOMAIN or domain_name  # fallback: use domain itself as master
-    master_ns = [
-        f"ns1.{panel_domain}",
-        f"ns2.{panel_domain}",
-        f"ns3.{panel_domain}",
-    ]
+    master_ns    = [f"ns1.{panel_domain}", f"ns2.{panel_domain}", f"ns3.{panel_domain}"]
     domain_ns1, domain_ns2 = f"ns1.{domain_name}", f"ns2.{domain_name}"
 
-    # All NS records: 3 master + 2 domain-specific
-    all_ns = master_ns + [domain_ns1, domain_ns2]
+    # Deduplicate while preserving order (handles PANEL_DOMAIN == domain_name)
+    all_ns = list(dict.fromkeys(master_ns + [domain_ns1, domain_ns2]))
 
     zone = _z(domain_name)
     rrsets = [
@@ -460,51 +603,51 @@ async def sync_zone_ns(domain_name: str, ip: str) -> bool:
         # NS rrset for the zone
         _ns_rrset(domain_name, all_ns),
     ]
-    async with panel_client(timeout=10) as client:
-        try:
-            resp = await client.patch(
-                f"{PDNS_BASE}/zones/{zone}",
-                headers=_HEADERS,
-                json={"rrsets": rrsets},
-            )
-            if resp.status_code not in (200, 204):
-                resp.raise_for_status()
-            log.info("NS sync: %s → %d NS records → %s", domain_name, len(all_ns), ip)
-            return True
-        except httpx.HTTPError as exc:
-            log.error("NS sync failed for %s: %s", domain_name, exc)
+    async with panel_client(timeout=15) as client:
+        if not await _ensure_zone(client, zone):
+            log.error("NS sync skipped for %s — zone not available", domain_name)
             return False
+        ok = await _pdns_patch_with_retry(client, zone, rrsets)
+        if ok:
+            log.info("NS sync: %s → %d NS records → %s", domain_name, len(all_ns), ip)
+        else:
+            log.error("NS sync failed for %s", domain_name)
+        return ok
 
 
 async def sync_panel_ns_zone(ip: str) -> bool:
-    """Ensure ns1/ns2/ns3.{PANEL_DOMAIN} A records exist in the panel's own zone.
+    """Ensure ns1/ns2/ns3.{PANEL_DOMAIN} A records and NS rrset exist in the panel zone.
 
-    These are the shared master nameserver glue records that all customer domains
-    reference in their NS rrsets.
+    The panel's own zone needs:
+      - NS records pointing to ns1-3.PANEL_DOMAIN (the zone delegates to itself)
+      - A records for ns1/ns2/ns3 so external resolvers can find the nameservers
+
+    This is called on startup and whenever the external IP changes.
     """
     if not PANEL_DOMAIN:
         return False
-    zone = _z(PANEL_DOMAIN)
+    zone  = _z(PANEL_DOMAIN)
+    ns1   = f"ns1.{PANEL_DOMAIN}"
+    ns2   = f"ns2.{PANEL_DOMAIN}"
+    ns3   = f"ns3.{PANEL_DOMAIN}"
     rrsets = [
-        _a(f"ns1.{PANEL_DOMAIN}", ip, ttl=86400),
-        _a(f"ns2.{PANEL_DOMAIN}", ip, ttl=86400),
-        _a(f"ns3.{PANEL_DOMAIN}", ip, ttl=86400),
+        # NS delegation for the panel zone itself
+        _ns_rrset(PANEL_DOMAIN, [ns1, ns2, ns3]),
+        # Glue A records for ns1-3
+        _a(ns1, ip, ttl=86400),
+        _a(ns2, ip, ttl=86400),
+        _a(ns3, ip, ttl=86400),
     ]
-    async with panel_client(timeout=10) as client:
-        await _ensure_zone(client, zone)
-        try:
-            resp = await client.patch(
-                f"{PDNS_BASE}/zones/{zone}",
-                headers=_HEADERS,
-                json={"rrsets": rrsets},
-            )
-            if resp.status_code not in (200, 204):
-                resp.raise_for_status()
-            log.info("Panel NS glue synced: ns1-3.%s → %s", PANEL_DOMAIN, ip)
-            return True
-        except httpx.HTTPError as exc:
-            log.error("Panel NS glue sync failed: %s", exc)
+    async with panel_client(timeout=15) as client:
+        if not await _ensure_zone(client, zone):
+            log.error("Panel NS zone ensure failed for %s", PANEL_DOMAIN)
             return False
+        ok = await _pdns_patch_with_retry(client, zone, rrsets)
+        if ok:
+            log.info("Panel NS zone synced: ns1-3.%s → %s", PANEL_DOMAIN, ip)
+        else:
+            log.error("Panel NS zone sync incomplete for %s", PANEL_DOMAIN)
+        return ok
 
 
 async def sync_all_ns(domains: list["Domain"], ip: str = "") -> dict:
@@ -562,21 +705,15 @@ async def sync_all_domains(domains: list["Domain"], server_ip: str = "") -> dict
         rrsets = _build_rrsets(domain, ip, mail_host)
         if not rrsets:
             continue
-        async with panel_client(timeout=10) as client:
+        async with panel_client(timeout=15) as client:
             if not await _ensure_zone(client, zone):
                 errors.append(f"{domain.name}: zone ensure failed")
                 continue
-            try:
-                resp = await client.patch(
-                    f"{PDNS_BASE}/zones/{zone}",
-                    headers=_HEADERS,
-                    json={"rrsets": rrsets},
-                )
-                resp.raise_for_status()
+            ok = await _pdns_patch_with_retry(client, zone, rrsets)
+            if ok:
                 provisioned.append(domain.name)
-            except httpx.HTTPError as exc:
-                log.error("DNS sync error for %s: %s", domain.name, exc)
-                errors.append(f"{domain.name}: {exc}")
+            else:
+                errors.append(f"{domain.name}: patch failed after retries")
 
     # Delete zones that exist in PowerDNS but not in the DB.
     # Never delete the panel's own zone — it is not a customer domain.
@@ -593,6 +730,10 @@ async def sync_all_domains(domains: list["Domain"], server_ip: str = "") -> dict
             except httpx.HTTPError as exc:
                 log.error("DNS sync delete failed for %s: %s", name, exc)
                 errors.append(f"{name} (delete): {exc}")
+
+    # Sync panel NS glue zone once after all customer domains are provisioned
+    if ip:
+        await sync_panel_ns_zone(ip)
 
     log.info(
         "DNS sync complete — provisioned=%d deleted=%d errors=%d",
