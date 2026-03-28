@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../utils/api';
 import {
   Container, Play, Square, RotateCcw, Trash2, Terminal,
@@ -118,9 +118,11 @@ function PortAssignmentsPanel({ domain }) {
 
 export default function DockerPage() {
   const [containers, setContainers] = useState([]);
+  const [stats,      setStats]      = useState({});   // name → {CPUPerc, MemUsage, …}
   const [loading,    setLoading]    = useState(true);
   const [logs,       setLogs]       = useState({ show: false, domain: '', content: '' });
   const [expanded,   setExpanded]   = useState({});   // domain → bool
+  const statsTimer = useRef(null);
 
   const load = async () => {
     setLoading(true);
@@ -131,7 +133,29 @@ export default function DockerPage() {
     setLoading(false);
   };
 
-  useEffect(() => { load(); }, []);
+  const loadStats = useCallback(async () => {
+    try {
+      const { data } = await api.get('/api/docker/stats');
+      setStats(data);
+    } catch { /* non-fatal */ }
+  }, []);
+
+  // Extract total memory from any stats entry (all share the same host total)
+  const totalMem = Object.values(stats)[0]?.MemUsage?.split(' / ')[1] ?? null;
+
+  // Return only the "used" portion, stripping the "/ total" part
+  const memUsed = name => {
+    const raw = stats[name]?.MemUsage;
+    if (!raw) return '—';
+    return raw.split(' / ')[0];
+  };
+
+  useEffect(() => {
+    load();
+    loadStats();
+    statsTimer.current = setInterval(loadStats, 5000);
+    return () => clearInterval(statsTimer.current);
+  }, [loadStats]);
 
   const action = async (domain, act) => {
     await api.post(`/api/docker/containers/${domain}/action`, { action: act });
@@ -168,10 +192,17 @@ export default function DockerPage() {
         </button>
       </div>
 
-      <div className="card text-xs text-gray-400 bg-blue-900/10 border-blue-800">
-        Each domain runs in its own isolated Docker container with memory/CPU limits,
-        read-only filesystem, and a separate network namespace. Every service is
-        assigned its own globally unique host port — no two customers ever share a port.
+      <div className="card text-xs text-gray-400 bg-blue-900/10 border-blue-800 flex items-center justify-between gap-4">
+        <span>
+          Each domain runs in its own isolated Docker container with memory/CPU limits,
+          read-only filesystem, and a separate network namespace. Every service is
+          assigned its own globally unique host port — no two customers ever share a port.
+        </span>
+        {totalMem && (
+          <span className="shrink-0 font-mono text-gray-300 bg-panel-700 px-2.5 py-1 rounded-lg border border-panel-600 whitespace-nowrap">
+            Host RAM: <span className="text-white font-semibold">{totalMem}</span>
+          </span>
+        )}
       </div>
 
       {/* Container table */}
@@ -214,8 +245,12 @@ export default function DockerPage() {
                       {c.State || c.Status || '—'}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-gray-400">{c.CPUPerc || '—'}</td>
-                  <td className="px-4 py-3 text-gray-400">{c.MemUsage || '—'}</td>
+                  <td className="px-4 py-3 text-gray-400 font-mono text-xs">
+                    {stats[rawName]?.CPUPerc ?? c.CPUPerc ?? '—'}
+                  </td>
+                  <td className="px-4 py-3 text-gray-400 font-mono text-xs">
+                    {memUsed(rawName)}
+                  </td>
                   <td className="px-4 py-3 text-gray-500 text-xs">{c.Ports || '—'}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">

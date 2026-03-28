@@ -37,7 +37,9 @@ certificatesResolvers:
 
 providers:
   docker:
-    endpoint: "unix:///var/run/docker.sock"
+    # Route through docker-api-proxy (nginx) which rewrites legacy v1.24
+    # API paths to v1.47, required for Docker Engine 29+ (min API 1.40).
+    endpoint: "tcp://docker-api-proxy:2375"
     exposedByDefault: false
     network: webpanel_net
 

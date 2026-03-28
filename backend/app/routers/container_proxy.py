@@ -5,6 +5,7 @@ over the internal webpanel_net Docker network.
 """
 import os
 import httpx
+from app.http_client import panel_client
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -31,7 +32,7 @@ _TLS_VERIFY = False
 
 async def _proxy_get(url: str) -> dict:
     headers = {"Authorization": f"Bearer {CONTAINER_API_TOKEN}"} if CONTAINER_API_TOKEN else {}
-    async with httpx.AsyncClient(timeout=10, verify=_TLS_VERIFY) as client:
+    async with panel_client(timeout=10, verify=_TLS_VERIFY) as client:
         try:
             r = await client.get(url, headers=headers)
             r.raise_for_status()
@@ -46,7 +47,7 @@ async def _proxy_get(url: str) -> dict:
 
 async def _proxy_post(url: str, body: dict) -> dict:
     headers = {"Authorization": f"Bearer {CONTAINER_API_TOKEN}"} if CONTAINER_API_TOKEN else {}
-    async with httpx.AsyncClient(timeout=30, verify=_TLS_VERIFY) as client:
+    async with panel_client(timeout=30, verify=_TLS_VERIFY) as client:
         try:
             r = await client.post(url, json=body, headers=headers)
             r.raise_for_status()
@@ -182,7 +183,7 @@ async def create_site_backup(domain: str, _=Depends(get_current_user)):
 async def delete_site_backup(domain: str, filename: str, _=Depends(require_admin)):
     """Delete a named site backup file from the domain container."""
     headers = {"Authorization": f"Bearer {CONTAINER_API_TOKEN}"} if CONTAINER_API_TOKEN else {}
-    async with httpx.AsyncClient(timeout=15, verify=_TLS_VERIFY) as client:
+    async with panel_client(timeout=15, verify=_TLS_VERIFY) as client:
         try:
             r = await client.delete(
                 _container_api_url(domain, f"/site-backup/{filename}"), headers=headers
@@ -200,7 +201,7 @@ async def download_site_backup(domain: str, filename: str, _=Depends(get_current
     """Stream a site backup file from the domain container."""
     from fastapi.responses import StreamingResponse
     headers = {"Authorization": f"Bearer {CONTAINER_API_TOKEN}"} if CONTAINER_API_TOKEN else {}
-    async with httpx.AsyncClient(timeout=120, verify=_TLS_VERIFY) as client:
+    async with panel_client(timeout=120, verify=_TLS_VERIFY) as client:
         try:
             r = await client.get(
                 _container_api_url(domain, f"/site-backup/download/{filename}"), headers=headers
@@ -221,7 +222,7 @@ async def download_site_backup(domain: str, filename: str, _=Depends(get_current
 async def sftp_revoke(domain: str, _=Depends(require_admin)):
     """Revoke SFTP access — removes OS user and keys."""
     headers = {"Authorization": f"Bearer {CONTAINER_API_TOKEN}"} if CONTAINER_API_TOKEN else {}
-    async with httpx.AsyncClient(timeout=15, verify=_TLS_VERIFY) as client:
+    async with panel_client(timeout=15, verify=_TLS_VERIFY) as client:
         try:
             r = await client.delete(
                 _container_api_url(domain, "/sftp/revoke"), headers=headers

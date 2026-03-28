@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import {
   LayoutDashboard, Globe, Users, Container, Server,
   FolderOpen, Database, Mail, ShieldCheck, ScrollText,
   HardDrive, Terminal, Settings, LogOut,
-  Package, Eye, Activity, Shield, ChevronRight, Cpu,
+  Package, Eye, Activity, Shield, ChevronRight, ChevronLeft, Cpu,
   LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit, Stethoscope,
 } from 'lucide-react';
 import AiPanel from './AiPanel';
@@ -136,6 +136,14 @@ export default function Layout({ children }) {
   const navigate   = useNavigate();
   const location   = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const historyDepth = useRef(0);
+
+  // Track navigation depth so we know when there's somewhere to go back to
+  useEffect(() => {
+    historyDepth.current += 1;
+  }, [location.pathname]);
+
+  const canGoBack = historyDepth.current > 1;
 
   const isAdmin    = ['superadmin', 'admin'].includes(user?.role);
   const breadcrumb = ROUTE_LABELS[location.pathname] ?? 'GnuKontrolR';
@@ -262,6 +270,16 @@ export default function Layout({ children }) {
         {/* Topbar */}
         <header className="h-12 bg-panel-surface border-b border-panel-border px-5 flex items-center justify-between flex-shrink-0">
           <div className="flex items-center gap-1.5 text-[13px]">
+            {canGoBack && (
+              <button
+                onClick={() => navigate(-1)}
+                className="text-ink-faint hover:text-ink-primary transition-colors p-0.5 -ml-1 mr-0.5"
+                title="Go back"
+                aria-label="Go back"
+              >
+                <ChevronLeft size={15} />
+              </button>
+            )}
             <button
               onClick={() => navigate('/')}
               className="flex items-center gap-1.5 text-ink-faint hover:text-ink-primary transition-colors"

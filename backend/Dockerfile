@@ -62,6 +62,11 @@ RUN mkdir -p /app/data && chown panelapi:panelapi /app/data
 # Customer site files root (mount the same volume as the customer containers)
 RUN mkdir -p /var/webpanel/sites && chown panelapi:panelapi /var/webpanel/sites
 
+# DKIM keys dir — panelapi generates and writes DKIM keypairs here.
+# The dkim_keys volume is bind-mounted at runtime; we create the path so the
+# chown is reflected in the image layer used as the volume initialiser.
+RUN mkdir -p /etc/opendkim/keys && chown -R panelapi:panelapi /etc/opendkim/keys
+
 USER panelapi
 
 EXPOSE 8000

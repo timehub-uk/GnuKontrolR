@@ -30,7 +30,9 @@ from datetime import datetime
 from app.auth import get_current_user, require_admin
 from app.database import get_db as get_db_dep
 from app.routers.container_proxy import _container_api_url, _TLS_VERIFY
+from app.dns_helper import register_vdns
 import httpx
+from app.http_client import panel_client
 
 router = APIRouter(prefix="/api/marketplace", tags=["marketplace"])
 
@@ -356,7 +358,7 @@ async def list_apps(_user=Depends(get_current_user)):
 @router.get("/installed/{domain}")
 async def list_installed(domain: str, _user=Depends(get_current_user)):
     url = _container_api_url(domain, "/install/list")
-    async with httpx.AsyncClient(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
+    async with panel_client(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
         try:
             r = await c.get(url, headers={"Authorization": f"Bearer {_get_token(domain)}"})
             return r.json()
@@ -406,15 +408,21 @@ async def start_install(req: InstallRequest, user=Depends(get_current_user)):
     }
 
     url = _container_api_url(req.domain, "/install")
-    async with httpx.AsyncClient(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
+    async with panel_client(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
         try:
             r = await c.post(url, json=payload,
                              headers={"Authorization": f"Bearer {_get_token(req.domain)}"})
             r.raise_for_status()
             data = r.json()
+            # Register a virtual subdomain in PowerDNS so the service is
+            # accessible as {app_id}.{domain} from outside the server.
+            vdns_host = await register_vdns(req.domain, req.app_id)
+            vdns_url  = f"https://{vdns_host}"
             # Return job_id plus the generated credentials so the frontend can display them
             return {
                 **data,
+                "vdns":      vdns_url,
+                "vdns_host": vdns_host,
                 "generated": {
                     "db_name":    db_name,
                     "db_user":    db_user,
@@ -431,10 +439,55 @@ async def start_install(req: InstallRequest, user=Depends(get_current_user)):
 @router.get("/install/status/{domain}/{job_id}")
 async def install_status(domain: str, job_id: str, _user=Depends(get_current_user)):
     url = _container_api_url(domain, f"/install/status/{job_id}")
-    async with httpx.AsyncClient(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
+    async with panel_client(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
         try:
             r = await c.get(url, headers={"Authorization": f"Bearer {_get_token(domain)}"})
             return r.json()
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+
+@router.delete("/installed/{domain}/{app_id}")
+async def remove_app(domain: str, app_id: str, _user=Depends(get_current_user)):
+    """Remove an installed app from the domain container."""
+    url = _container_api_url(domain, f"/install/{app_id}")
+    async with panel_client(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
+        try:
+            r = await c.delete(url, headers={"Authorization": f"Bearer {_get_token(domain)}"})
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text)
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+
+@router.post("/installed/{domain}/{app_id}/repair")
+async def repair_app(domain: str, app_id: str, _user=Depends(get_current_user)):
+    """Repair (re-configure) an installed app without wiping data."""
+    url = _container_api_url(domain, f"/install/{app_id}/repair")
+    async with panel_client(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
+        try:
+            r = await c.post(url, headers={"Authorization": f"Bearer {_get_token(domain)}"})
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text)
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+
+@router.post("/installed/{domain}/{app_id}/reset")
+async def reset_app(domain: str, app_id: str, _user=Depends(get_current_user)):
+    """Reset an installed app — wipes all app data and reinstalls from scratch."""
+    url = _container_api_url(domain, f"/install/{app_id}/reset")
+    async with panel_client(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
+        try:
+            r = await c.post(url, headers={"Authorization": f"Bearer {_get_token(domain)}"})
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text)
         except Exception as e:
             raise HTTPException(502, str(e))
 
@@ -754,7 +807,7 @@ async def apply_template(req: ApplyTemplateRequest, user=Depends(get_current_use
         raise HTTPException(400, f"Unknown applies_to: {applies_to}")
 
     url = _container_api_url(req.domain, endpoint)
-    async with httpx.AsyncClient(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
+    async with panel_client(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
         try:
             r = await c.post(url, json=payload,
                              headers={"Authorization": f"Bearer {_get_token(req.domain)}"})

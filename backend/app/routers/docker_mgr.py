@@ -7,6 +7,7 @@ import socket
 import subprocess
 import json
 import httpx
+from app.http_client import panel_client
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -60,7 +61,7 @@ async def _inject_panel_ssh_key(domain: str) -> bool:
     headers = {"Authorization": f"Bearer {_CONTAINER_API_TOKEN}"} if _CONTAINER_API_TOKEN else {}
     for attempt in range(6):  # container may still be initialising
         try:
-            async with httpx.AsyncClient(timeout=10, verify=False) as client:
+            async with panel_client(timeout=10, verify=False) as client:
                 r = await client.post(url, json={"public_key": pub_key}, headers=headers)
                 if r.status_code == 200:
                     return True
@@ -514,7 +515,7 @@ async def set_webuser_ssh_key(domain: str, body: WebUserSshKeyRequest, db=Depend
             raise HTTPException(403, "Access denied")
     url = _container_api_url_direct(domain, "/webuser/ssh-key")
     headers = {"Authorization": f"Bearer {_CONTAINER_API_TOKEN}"} if _CONTAINER_API_TOKEN else {}
-    async with httpx.AsyncClient(timeout=15, verify=False) as client:
+    async with panel_client(timeout=15, verify=False) as client:
         try:
             r = await client.post(url, json={"public_key": body.public_key}, headers=headers)
             r.raise_for_status()
@@ -604,7 +605,7 @@ async def inject_admin_ssh_key(domain: str, body: AdminSshKeyRequest, _=Depends(
     """
     url = _container_api_url(domain, "/admin/ssh-key")
     headers = {"Authorization": f"Bearer {_CONTAINER_API_TOKEN}"} if _CONTAINER_API_TOKEN else {}
-    async with httpx.AsyncClient(timeout=15, verify=_TLS_VERIFY) as client:
+    async with panel_client(timeout=15, verify=_TLS_VERIFY) as client:
         try:
             r = await client.post(url, json={"public_key": body.public_key}, headers=headers)
             r.raise_for_status()
@@ -632,7 +633,7 @@ async def revoke_admin_ssh_key(domain: str, _=Depends(require_admin)):
     """Remove the superadmin SSH key from a domain container."""
     url = _container_api_url(domain, "/admin/ssh-key")
     headers = {"Authorization": f"Bearer {_CONTAINER_API_TOKEN}"} if _CONTAINER_API_TOKEN else {}
-    async with httpx.AsyncClient(timeout=10, verify=_TLS_VERIFY) as client:
+    async with panel_client(timeout=10, verify=_TLS_VERIFY) as client:
         try:
             r = await client.delete(url, headers=headers)
             r.raise_for_status()
@@ -657,3 +658,41 @@ async def container_stats(domain: str, db=Depends(get_db), current: User = Depen
     if code != 0:
         raise HTTPException(500, err)
     return json.loads(out) if out else {}
+
+
+def _collect_all_stats() -> dict:
+    """Blocking — run in thread pool. Returns stats keyed by container name."""
+    code, out, err = _run([
+        "docker", "stats", "--no-stream", "--format", "{{json .}}",
+    ])
+    if code != 0:
+        return {}
+    stats: dict = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+            name = row.get("Name") or row.get("ID", "")
+            stats[name] = {
+                "CPUPerc":  row.get("CPUPerc", "—"),
+                "MemUsage": row.get("MemUsage", "—"),
+                "MemPerc":  row.get("MemPerc", "—"),
+                "NetIO":    row.get("NetIO", "—"),
+                "BlockIO":  row.get("BlockIO", "—"),
+            }
+        except Exception:
+            continue
+    return stats
+
+
+@router.get("/stats")
+async def all_container_stats(_=Depends(require_admin)):
+    """
+    Return CPU / memory stats for every running container in one call.
+    Offloaded to a thread pool since docker stats --no-stream blocks ~2s.
+    Returns a dict keyed by container name for frontend merging.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _collect_all_stats)

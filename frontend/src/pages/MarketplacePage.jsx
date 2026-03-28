@@ -360,6 +360,7 @@ function InstallModal({ app, domains, onClose, onDone }) {
   const [jobId,      setJobId]      = useState(null);
   const [result,     setResult]     = useState(null);
   const [generated,  setGenerated]  = useState(null);
+  const [vdns,       setVdns]       = useState(null);
   const [err,        setErr]        = useState('');
   const pollRef = useRef(null);
   const logRef  = useRef(null);
@@ -391,6 +392,7 @@ function InstallModal({ app, domains, onClose, onDone }) {
       const jid = r.data.job_id;
       setJobId(jid);
       setGenerated(r.data.generated ?? null);
+      setVdns(r.data.vdns ?? null);
 
       pollRef.current = setInterval(async () => {
         try {
@@ -497,6 +499,23 @@ function InstallModal({ app, domains, onClose, onDone }) {
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
               {app.name} installed successfully
             </div>
+
+            {/* Virtual DNS card */}
+            {vdns && (
+              <div className="rounded-xl border border-brand-600/40 bg-brand-900/10 px-4 py-3 text-sm">
+                <div className="flex items-center gap-2 mb-1">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#818cf8" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                  <span className="text-xs font-semibold text-brand-300 uppercase tracking-wide">Virtual DNS</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-brand-200 text-xs">{vdns}</span>
+                  <CopyButton text={vdns} />
+                </div>
+                <p className="text-[11px] text-gray-500 mt-1">
+                  DNS A record registered — accessible from outside once DNS propagates.
+                </p>
+              </div>
+            )}
 
             {/* Credentials card */}
             <div className="rounded-xl border border-panel-600 bg-panel-700/40 divide-y divide-panel-600 text-sm">
@@ -829,9 +848,156 @@ function SftpTab({ domains }) {
   );
 }
 
+// ── Installed apps tab ────────────────────────────────────────────────────────
+
+function InstalledAppsTab({ domains }) {
+  const [domain,   setDomain]   = useState(domains[0] ?? '');
+  const [apps,     setApps]     = useState([]);
+  const [loading,  setLoading]  = useState(false);
+  const [confirm,  setConfirm]  = useState(null); // { app_id, action }
+  const [busy,     setBusy]     = useState(null);  // app_id being actioned
+  const [msg,      setMsg]      = useState('');
+
+  const load = useCallback(async d => {
+    if (!d) return;
+    setLoading(true); setMsg('');
+    try {
+      const r = await api.get(`/api/marketplace/installed/${d}`);
+      setApps(r.data?.apps ?? r.data ?? []);
+    } catch { setApps([]); }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(domain); }, [domain, load]);
+
+  const doAction = async (appId, action) => {
+    setBusy(appId); setConfirm(null); setMsg('');
+    try {
+      if (action === 'remove') {
+        await api.delete(`/api/marketplace/installed/${domain}/${appId}`);
+        setMsg(`${appId} removed.`);
+      } else {
+        await api.post(`/api/marketplace/installed/${domain}/${appId}/${action}`);
+        setMsg(`${appId} ${action} started.`);
+      }
+      await load(domain);
+    } catch (e) {
+      setMsg(e.response?.data?.detail ?? `${action} failed.`);
+    }
+    setBusy(null);
+  };
+
+  if (!domains.length) {
+    return <div className="panel text-ink-muted text-sm text-center py-10">Create a domain first.</div>;
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Domain selector */}
+      <div className="flex items-center gap-3">
+        <span className="text-sm text-gray-400">Domain:</span>
+        <select className="input w-fit"
+          value={domain} onChange={e => setDomain(e.target.value)}>
+          {domains.map(d => <option key={d}>{d}</option>)}
+        </select>
+        <button onClick={() => load(domain)} className="btn-ghost text-xs px-2 py-1">Refresh</button>
+      </div>
+
+      {msg && (
+        <p className={`text-sm px-3 py-2 rounded-lg ${msg.includes('failed') || msg.includes('error') ? 'bg-red-900/20 text-red-300' : 'bg-green-900/20 text-green-300'}`}>
+          {msg}
+        </p>
+      )}
+
+      {loading && <p className="text-sm text-gray-500">Loading…</p>}
+
+      {!loading && apps.length === 0 && (
+        <div className="card text-gray-500 text-sm text-center py-8">
+          No apps installed on <span className="text-white font-mono">{domain}</span> yet.
+        </div>
+      )}
+
+      {!loading && apps.length > 0 && (
+        <div className="card p-0 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-panel-700 text-gray-400 text-xs uppercase">
+              <tr>
+                {['App', 'Path', 'Version', 'Status', 'Actions'].map(h => (
+                  <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-panel-700">
+              {apps.map(app => (
+                <tr key={app.app_id ?? app.id} className="hover:bg-panel-700/40">
+                  <td className="px-4 py-3 font-medium text-white">{app.name ?? app.app_id}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-gray-400">{app.path ?? '/'}</td>
+                  <td className="px-4 py-3 text-xs text-gray-500">{app.version ?? '—'}</td>
+                  <td className="px-4 py-3">
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                      app.status === 'active'  ? 'bg-green-900/20 text-green-400' :
+                      app.status === 'error'   ? 'bg-red-900/20 text-red-400' :
+                                                 'bg-yellow-900/20 text-yellow-400'
+                    }`}>{app.status ?? 'installed'}</span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        title="Repair (re-configure without data loss)"
+                        disabled={busy === (app.app_id ?? app.id)}
+                        onClick={() => setConfirm({ app_id: app.app_id ?? app.id, action: 'repair' })}
+                        className="text-xs px-2.5 py-1 rounded-lg bg-blue-900/20 hover:bg-blue-800/40 text-blue-300 border border-blue-800/40 transition-colors disabled:opacity-40"
+                      >Repair</button>
+                      <button
+                        title="Reset (wipes all data and reinstalls)"
+                        disabled={busy === (app.app_id ?? app.id)}
+                        onClick={() => setConfirm({ app_id: app.app_id ?? app.id, action: 'reset' })}
+                        className="text-xs px-2.5 py-1 rounded-lg bg-yellow-900/20 hover:bg-yellow-800/40 text-yellow-300 border border-yellow-800/40 transition-colors disabled:opacity-40"
+                      >Reset</button>
+                      <button
+                        title="Remove app"
+                        disabled={busy === (app.app_id ?? app.id)}
+                        onClick={() => setConfirm({ app_id: app.app_id ?? app.id, action: 'remove' })}
+                        className="text-xs px-2.5 py-1 rounded-lg bg-red-900/20 hover:bg-red-800/40 text-red-400 border border-red-800/40 transition-colors disabled:opacity-40"
+                      >Remove</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Confirm dialog */}
+      {confirm && (
+        <div className="card border-warn/30 bg-warn/5">
+          <p className="text-sm text-ink-primary mb-3">
+            {confirm.action === 'remove' && `Remove ${confirm.app_id} from ${domain}? All app files will be deleted.`}
+            {confirm.action === 'reset'  && `Reset ${confirm.app_id}? This wipes all data and reinstalls from scratch.`}
+            {confirm.action === 'repair' && `Repair ${confirm.app_id}? Configuration will be re-applied without touching data.`}
+          </p>
+          <div className="flex gap-2">
+            <button onClick={() => doAction(confirm.app_id, confirm.action)}
+              className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
+                confirm.action === 'remove' ? 'bg-red-600 hover:bg-red-500 text-white' :
+                confirm.action === 'reset'  ? 'bg-yellow-600 hover:bg-yellow-500 text-white' :
+                                              'bg-blue-600 hover:bg-blue-500 text-white'
+              }`}>
+              Confirm {confirm.action}
+            </button>
+            <button onClick={() => setConfirm(null)} className="btn-ghost text-xs px-3 py-1.5">Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-const TABS = ['CMS', 'Framework', 'Webmail', 'Analytics', 'Collaboration', 'Developer', 'Utilities', 'Tools', 'SFTP'];
+const TABS = ['CMS', 'Framework', 'Webmail', 'Analytics', 'Collaboration', 'Developer', 'Utilities', 'Tools', 'SFTP', 'Installed'];
 const CAT_MAP = {
   CMS: 'cms', Framework: 'framework', Webmail: 'webmail', Analytics: 'analytics',
   Collaboration: 'collaboration', Developer: 'developer',
@@ -887,8 +1053,11 @@ export default function MarketplacePage() {
           : <SftpTab domains={domains} />
       )}
 
+      {/* Installed apps tab */}
+      {tab === 'Installed' && <InstalledAppsTab domains={domains} />}
+
       {/* App grid */}
-      {tab !== 'SFTP' && (
+      {tab !== 'SFTP' && tab !== 'Installed' && (
         domains.length === 0
           ? (
             <div className="panel p-10 text-center space-y-3">

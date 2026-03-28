@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
+from app.http_client import panel_client
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -300,7 +301,7 @@ async def provision_domain_dns(domain: "Domain", server_ip: str = "") -> None:
     if not rrsets:
         return
 
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with panel_client(timeout=10) as client:
         if not await _ensure_zone(client, zone):
             return
         try:
@@ -327,7 +328,7 @@ async def rotate_dkim_key(domain: "Domain") -> str:
     # Push the updated DKIM TXT record immediately
     if ip:
         zone = _z(domain.name)
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with panel_client(timeout=10) as client:
             await _ensure_zone(client, zone)
             try:
                 resp = await client.patch(
@@ -349,7 +350,7 @@ async def deprovision_domain_dns(domain_name: str) -> None:
     Called after a domain is deleted from the DB.
     """
     zone = _z(domain_name)
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with panel_client(timeout=10) as client:
         try:
             resp = await client.delete(f"{PDNS_BASE}/zones/{zone}", headers=_HEADERS)
             if resp.status_code not in (200, 204, 404):
@@ -357,6 +358,37 @@ async def deprovision_domain_dns(domain_name: str) -> None:
             log.info("DNS zone deleted: %s", domain_name)
         except httpx.HTTPError as exc:
             log.error("PowerDNS zone delete failed for %s: %s", domain_name, exc)
+
+
+async def register_vdns(domain: str, subdomain: str, server_ip: str = "") -> str:
+    """Add an A record *subdomain*.*domain* → SERVER_IP inside the domain's zone.
+
+    Returns the fully-qualified virtual hostname (e.g. "wordpress.example.com").
+    Creates the zone if it doesn't exist yet.
+    """
+    ip   = server_ip or SERVER_IP
+    fqdn = f"{subdomain}.{domain}"
+    zone = _z(domain)
+
+    if not ip:
+        log.warning("SERVER_IP not set — skipping VDNS registration for %s", fqdn)
+        return fqdn
+
+    async with panel_client(timeout=10) as client:
+        await _ensure_zone(client, zone)
+        try:
+            resp = await client.patch(
+                f"{PDNS_BASE}/zones/{zone}",
+                headers=_HEADERS,
+                json={"rrsets": [_a(fqdn, ip)]},
+            )
+            if resp.status_code not in (200, 204):
+                resp.raise_for_status()
+            log.info("VDNS registered: %s → %s", fqdn, ip)
+        except httpx.HTTPError as exc:
+            log.error("VDNS registration failed for %s: %s", fqdn, exc)
+
+    return fqdn
 
 
 async def sync_all_domains(domains: list["Domain"], server_ip: str = "") -> dict:
@@ -376,7 +408,7 @@ async def sync_all_domains(domains: list["Domain"], server_ip: str = "") -> dict
 
     # Fetch existing zones from PowerDNS.
     existing_zones: set[str] = set()
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with panel_client(timeout=10) as client:
         try:
             resp = await client.get(f"{PDNS_BASE}/zones", headers=_HEADERS)
             resp.raise_for_status()
@@ -398,7 +430,7 @@ async def sync_all_domains(domains: list["Domain"], server_ip: str = "") -> dict
         rrsets = _build_rrsets(domain, ip, mail_host)
         if not rrsets:
             continue
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with panel_client(timeout=10) as client:
             if not await _ensure_zone(client, zone):
                 errors.append(f"{domain.name}: zone ensure failed")
                 continue
@@ -419,7 +451,7 @@ async def sync_all_domains(domains: list["Domain"], server_ip: str = "") -> dict
     protected = {PANEL_DOMAIN} if PANEL_DOMAIN else set()
     stale = existing_zones - db_names - protected
     for name in stale:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with panel_client(timeout=10) as client:
             try:
                 resp = await client.delete(f"{PDNS_BASE}/zones/{_z(name)}", headers=_HEADERS)
                 if resp.status_code not in (200, 204, 404):

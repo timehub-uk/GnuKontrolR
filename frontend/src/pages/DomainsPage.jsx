@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import api from '../utils/api';
 import { fmtDate } from '../utils/dates';
 import DataTable from '../components/DataTable';
-import { Globe, Plus, Trash2, RefreshCw, ShieldCheck, Shield } from 'lucide-react';
+import { Globe, Plus, Trash2, RefreshCw, ShieldCheck, Shield, RefreshCcw } from 'lucide-react';
 
 const STATUS_BADGE = {
   active:    'bg-ok/15 text-ok-light border border-ok/25',
@@ -21,6 +21,7 @@ export default function DomainsPage() {
   const [adding,    setAdding]    = useState(false);
   const [showForm,  setShowForm]  = useState(false);
   const [deleting,  setDeleting]  = useState(null); // domain id pending delete confirm
+  const [syncing,   setSyncing]   = useState(null); // domain name being DNS-synced
 
   const load = async () => {
     setLoading(true);
@@ -49,6 +50,18 @@ export default function DomainsPage() {
       toast.error(err.response?.data?.detail || 'Error adding domain');
     } finally {
       setAdding(false);
+    }
+  };
+
+  const syncDns = async name => {
+    setSyncing(name);
+    try {
+      await api.post(`/api/dns/zones/${encodeURIComponent(name)}/ensure`);
+      toast.success(`DNS zone synced for ${name}`);
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'DNS sync failed');
+    } finally {
+      setSyncing(null);
     }
   };
 
@@ -99,13 +112,23 @@ export default function DomainsPage() {
       id: 'actions',
       header: '',
       cell: ({ row }) => (
-        <button
-          onClick={() => setDeleting(row.original.id)}
-          className="text-ink-muted hover:text-bad transition-colors p-1 rounded"
-          title="Delete domain"
-        >
-          <Trash2 size={13} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => syncDns(row.original.name)}
+            disabled={syncing === row.original.name}
+            className="text-ink-muted hover:text-brand transition-colors p-1 rounded"
+            title="Sync DNS zone"
+          >
+            <RefreshCcw size={13} className={syncing === row.original.name ? 'animate-spin' : ''} />
+          </button>
+          <button
+            onClick={() => setDeleting(row.original.id)}
+            className="text-ink-muted hover:text-bad transition-colors p-1 rounded"
+            title="Delete domain"
+          >
+            <Trash2 size={13} />
+          </button>
+        </div>
       ),
     }),
   ], []);

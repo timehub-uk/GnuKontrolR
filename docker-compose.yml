@@ -41,9 +41,26 @@ volumes:
 
 services:
 
+  # ── Docker API proxy ───────────────────────────────────────────────────────
+  # nginx proxy in front of /var/run/docker.sock that rewrites legacy API
+  # version paths (e.g. /v1.24/) to /v1.47/ so Traefik v3's Go Docker SDK
+  # (which negotiates starting at v1.24) works with Docker Engine 29+ whose
+  # minimum supported API is 1.40.
+  docker-api-proxy:
+    image: nginx:alpine
+    container_name: webpanel_docker_api_proxy
+    restart: unless-stopped
+    user: root    # needs root to read docker.sock (gid 984 not available in alpine nginx)
+    networks:
+      - webpanel_net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./docker/docker-api-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+    # No external port exposure — internal to webpanel_net only
+
   # ── Traefik ────────────────────────────────────────────────────────────────
   traefik:
-    image: traefik:v3.0
+    image: traefik:v3.3
     container_name: webpanel_traefik
     restart: unless-stopped
     networks:
@@ -58,19 +75,21 @@ services:
       - "110:110"
       - "995:995"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - traefik_certs:/certs
       - ./docker/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./docker/traefik/dynamic:/etc/traefik/dynamic:ro
     labels:
       - traefik.enable=true
       - traefik.http.routers.traefik-dash.rule=Host(`traefik.${PANEL_DOMAIN}`)
       - traefik.http.routers.traefik-dash.service=api@internal
     environment:
       - TZ=${TZ:-UTC}
+    depends_on:
+      - docker-api-proxy
 
   # ── PowerDNS ───────────────────────────────────────────────────────────────
   powerdns:
-    image: powerdns/pdns-auth-48:latest
+    image: powerdns/pdns-auth-49:latest
     container_name: webpanel_powerdns
     restart: unless-stopped
     networks:
@@ -86,7 +105,7 @@ services:
 
   # ── MySQL Master ───────────────────────────────────────────────────────────
   mysql:
-    image: mysql:8.0
+    image: mysql:8.4
     container_name: webpanel_mysql
     restart: unless-stopped
     networks:
@@ -107,7 +126,7 @@ services:
 
   # ── Redis ──────────────────────────────────────────────────────────────────
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: webpanel_redis
     restart: unless-stopped
     networks:
@@ -205,6 +224,9 @@ services:
       - webpanel_db:/app/data                        # SQLite DB
       - ./frontend/dist:/app/frontend/dist:ro        # built React SPA
       - dkim_keys:/etc/opendkim/keys                 # write DKIM private keys + tables
+      - /var/webpanel/panel_ssh:/var/webpanel/panel_ssh  # panel SSH keypair for container access
+      - /var/webpanel/app-cache:/var/webpanel/app-cache  # marketplace app cache
+      - /var/webpanel/localdns:/var/webpanel/localdns    # localdns hosts file (written by panel, read by dnsmasq)
     environment:
       - SECRET_KEY=${SECRET_KEY:-change_me_in_production}
       - SERVER_IP=${SERVER_IP}
@@ -213,13 +235,14 @@ services:
       - MYSQL_HOST=mysql
       - MYSQL_PASSWORD=${MYSQL_PASSWORD:-changeme_mysql}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme_redis}@redis:6379/0
-      - PDNS_API_URL=http://powerdns:8081
+      - PDNS_API_URL=http://powerdns:8081/api/v1/servers/localhost
       - PDNS_API_KEY=${PDNS_API_KEY:-changeme_pdns_key}
       - SMTP_HOST=postfix
       - SITES_ROOT=/var/webpanel/sites
       - DEBUG_LEVEL=${DEBUG_LEVEL:-0}
       - CONTAINER_API_TOKEN=${CONTAINER_API_TOKEN:-}
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-changeme_mysql_root}
+      - LOCALDNS_HOSTS_FILE=/var/webpanel/localdns/panel.hosts
     depends_on:
       mysql:
         condition: service_healthy
@@ -299,3 +322,25 @@ services:
       - /var/lib/docker/:/var/lib/docker:ro
       - /dev/disk/:/dev/disk:ro
     privileged: true
+
+  # ── Local DNS (dnsmasq) ────────────────────────────────────────────────────
+  # Resolves all panel domains → SERVER_IP so the host (and any machine
+  # pointing at it) can access customer sites without real public DNS.
+  # Port 5353 on the host (port 53 is taken by PowerDNS).
+  # The panel API writes /var/webpanel/localdns/panel.hosts and sends
+  # SIGHUP to reload dnsmasq whenever a domain is created / updated / deleted.
+  localdns:
+    build:
+      context: ./docker/localdns
+      dockerfile: Dockerfile
+    container_name: webpanel_localdns
+    restart: unless-stopped
+    networks:
+      - webpanel_net
+    ports:
+      - "5335:5300/udp"
+      - "5335:5300/tcp"
+    volumes:
+      - /var/webpanel/localdns:/etc/localdns
+    environment:
+      - TZ=${TZ:-UTC}
