@@ -18,6 +18,8 @@ import {
 } from 'lucide-react';
 import api from '../utils/api';
 import SecurityAdvisor from '../components/SecurityAdvisor';
+import SecurityScanner from '../components/SecurityScanner';
+import EmailSecurityPanel from '../components/EmailSecurityPanel';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -296,10 +298,12 @@ export default function SecurityPage() {
   }, []);
 
   const tabs = [
-    { id: 'audit',  label: 'Domain Audit',    icon: Eye },
-    { id: 'fleet',  label: 'Fleet Overview',  icon: Shield },
-    { id: 'ssl',    label: 'SSL Status',       icon: Lock },
-    { id: 'events', label: 'Security Events', icon: Flame },
+    { id: 'audit',   label: 'Domain Audit',    icon: Eye },
+    { id: 'fleet',   label: 'Fleet Overview',  icon: Shield },
+    { id: 'ssl',     label: 'SSL Status',       icon: Lock },
+    { id: 'events',  label: 'Security Events', icon: Flame },
+    { id: 'scanner', label: 'AV Scanner',      icon: ShieldAlert },
+    { id: 'email',   label: 'Email Security',  icon: Network },
   ];
 
   return (
@@ -310,8 +314,8 @@ export default function SecurityPage() {
           <Shield size={20} className="text-brand-400" /> Security
         </h1>
 
-        {/* Domain selector — shown on audit tab */}
-        {tab === 'audit' && (
+        {/* Domain selector — shown on audit and scanner tabs */}
+        {(tab === 'audit' || tab === 'scanner') && (
           <select
             value={selected}
             onChange={e => setSelected(e.target.value)}
@@ -355,6 +359,14 @@ export default function SecurityPage() {
 
       {tab === 'events' && (
         <SecurityEventFeed />
+      )}
+
+      {tab === 'scanner' && (
+        <SecurityScanner domain={selected} />
+      )}
+
+      {tab === 'email' && (
+        <EmailSecurityPanel domains={domains} />
       )}
     </div>
   );

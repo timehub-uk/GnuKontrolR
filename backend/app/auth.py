@@ -13,14 +13,22 @@ from sqlalchemy import select
 from app.database import get_db
 from app.models.user import User, Role
 
-SECRET_KEY     = os.environ.get("SECRET_KEY", "change-me-in-production-use-32-char-secret")
-_DEFAULT_KEY = "change-me-in-production-use-32-char-secret"
+_DEFAULT_KEY   = "change-me-in-production-use-32-char-secret"
+SECRET_KEY     = os.environ.get("SECRET_KEY", _DEFAULT_KEY)
+_IS_PRODUCTION = os.environ.get("ENVIRONMENT", "").lower() == "production"
+import logging as _log
 if SECRET_KEY == _DEFAULT_KEY:
-    import logging as _log
-    _log.getLogger("webpanel").warning(
-        "SECURITY: SECRET_KEY is set to the default value. "
-        "Set a strong random SECRET_KEY environment variable before deploying to production."
-    )
+    if _IS_PRODUCTION:
+        _log.getLogger("webpanel").critical(
+            "FATAL: SECRET_KEY is the default value in a production environment. "
+            "Set a strong random SECRET_KEY before starting."
+        )
+        raise SystemExit("Refusing to start with default SECRET_KEY in production.")
+    else:
+        _log.getLogger("webpanel").warning(
+            "SECURITY: SECRET_KEY is set to the default value. "
+            "Set a strong random SECRET_KEY before deploying to production."
+        )
 ALGORITHM      = "HS256"
 ACCESS_EXPIRE  = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
 REFRESH_EXPIRE = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", 7))

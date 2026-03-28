@@ -41,9 +41,11 @@ app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB max request body
 DOMAIN    = os.environ.get("DOMAIN", "localhost")
 API_TOKEN = os.environ.get("CONTAINER_API_TOKEN", "")
 
-# Must have a token set in production
+# Refuse to start without a token — unauthenticated container APIs are a critical risk
 if not API_TOKEN:
-    log.warning("CONTAINER_API_TOKEN not set — API is unauthenticated! Set it before deployment.")
+    import sys
+    log.critical("CONTAINER_API_TOKEN is not set. Refusing to start — all requests would be unauthenticated.")
+    sys.exit(1)
 
 # ── Simple in-process rate limiter ───────────────────────────────────────────
 _rate: dict[str, list] = defaultdict(list)
@@ -259,6 +261,70 @@ def delete_public_file():
     elif f.exists():
         f.unlink()
     return jsonify({"ok": True})
+
+
+@app.post("/files/public/mkdir")
+def mkdir_public():
+    _verify_token()
+    body = request.json or {}
+    rel = body.get("path", "")
+    d = _safe(PUBLIC_ROOT, rel)
+    d.mkdir(parents=True, exist_ok=True)
+    shutil.chown(str(d), "www-data", "www-data")
+    return jsonify({"ok": True})
+
+
+@app.post("/files/public/upload")
+def upload_public_file():
+    """Upload a file into the public web root.
+    Optionally scans with ClamAV (clamscan) if available.
+    Multipart form: file=<binary>, path=<target directory (relative)>.
+    """
+    _verify_token()
+    if "file" not in request.files:
+        abort(400)
+    from flask import Request as _Req
+    f = request.files["file"]
+    rel_dir = request.form.get("path", "")
+    dest_dir = _safe(PUBLIC_ROOT, rel_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Sanitise filename
+    fname = Path(f.filename).name if f.filename else "upload"
+    fname = re.sub(r'[^\w.\-]', '_', fname)
+    dest = dest_dir / fname
+
+    # Save to temp location first for scanning
+    with tempfile.NamedTemporaryFile(delete=False, suffix=fname) as tmp:
+        tmp_path = tmp.name
+        f.save(tmp_path)
+
+    # ClamAV scan (best-effort — if clamscan not installed, skip)
+    scan_result = "skipped"
+    try:
+        result = subprocess.run(
+            ["clamscan", "--no-summary", tmp_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 1:
+            os.unlink(tmp_path)
+            return jsonify({"ok": False, "error": "Malware detected — file rejected", "scan": "infected"}), 400
+        scan_result = "clean"
+    except FileNotFoundError:
+        scan_result = "clamscan_not_installed"
+    except subprocess.TimeoutExpired:
+        scan_result = "scan_timeout"
+
+    # Move to destination + fix ownership
+    shutil.move(tmp_path, str(dest))
+    shutil.chown(str(dest), "www-data", "www-data")
+
+    return jsonify({
+        "ok":       True,
+        "filename": dest.name,
+        "path":     str(dest.relative_to(PUBLIC_ROOT)),
+        "scan":     scan_result,
+    })
 
 
 # ── Uploads / Private ─────────────────────────────────────────────────────────
@@ -563,12 +629,31 @@ def _mysql_exec(sql: str) -> tuple[bool, str]:
     return r.returncode == 0, (r.stderr or r.stdout).strip()
 
 
+def _safe_sql_identifier(s: str, max_len: int = 32) -> str:
+    """Strip all non-alphanumeric/underscore chars to make a safe SQL identifier."""
+    import re as _re2
+    clean = _re2.sub(r'[^\w]', '_', s)[:max_len]
+    if not clean or not clean[0].isalpha():
+        clean = 'db_' + clean[:max_len - 3]
+    return clean
+
+
+def _escape_sql_string(s: str) -> str:
+    """Escape a value for use inside single quotes in SQL (last-resort guard)."""
+    return s.replace('\\', '\\\\').replace("'", "\\'").replace('\0', '').replace('\n', '\\n')
+
+
 def _create_db(db_name: str, db_user: str, db_pass: str) -> tuple[bool, str]:
+    # Sanitise identifiers — must be alphanumeric/underscore only
+    safe_name = _safe_sql_identifier(db_name)
+    safe_user = _safe_sql_identifier(db_user)
+    # Escape password string value
+    safe_pass = _escape_sql_string(db_pass)
     sql = (
-        f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
+        f"CREATE DATABASE IF NOT EXISTS `{safe_name}` "
         f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "
-        f"CREATE USER IF NOT EXISTS '{db_user}'@'localhost' IDENTIFIED BY '{db_pass}'; "
-        f"GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{db_user}'@'localhost'; "
+        f"CREATE USER IF NOT EXISTS '{safe_user}'@'localhost' IDENTIFIED BY '{safe_pass}'; "
+        f"GRANT ALL PRIVILEGES ON `{safe_name}`.* TO '{safe_user}'@'localhost'; "
         f"FLUSH PRIVILEGES;"
     )
     return _mysql_exec(sql)
@@ -2204,6 +2289,224 @@ def admin_ssh_key_revoke():
         ADMIN_AUTH_KEYS.write_text("")
     log.info("Superadmin SSH key revoked for domain %s", DOMAIN)
     return jsonify({"ok": True})
+
+
+# ── Site backup ───────────────────────────────────────────────────────────────
+#
+# Backup types:
+#   website — /var/www/html (web files) + MariaDB dump
+#   files   — /var/www/html only
+#   db      — MariaDB dump only
+#   full    — website + /var/config (nginx, php, env, ssl configs)
+#
+# Backups are stored in /var/customer/backups/ as .tar.gz archives.
+# A maximum of 10 backups are kept; oldest are pruned automatically.
+
+SITE_BACKUP_MAX = 10
+
+
+def _db_credentials() -> tuple[str, str, str]:
+    """Return (db_name, user, password) from the container's env file."""
+    env_file = ENV_DIR / "site.env"
+    db_name  = DOMAIN.replace(".", "_").replace("-", "_")
+    user     = "site_" + db_name
+    password = ""
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            if line.startswith("DB_PASSWORD="):
+                password = line.split("=", 1)[1].strip()
+            elif line.startswith("DB_USER="):
+                user = line.split("=", 1)[1].strip()
+            elif line.startswith("DB_NAME="):
+                db_name = line.split("=", 1)[1].strip()
+    return db_name, user, password
+
+
+@app.get("/site-backup/list")
+def site_backup_list():
+    _verify_token()
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    backups = []
+    for f in sorted(BACKUPS_DIR.glob("site-backup-*.tar.gz"), reverse=True):
+        stat = f.stat()
+        backups.append({
+            "filename": f.name,
+            "size":     stat.st_size,
+            "created":  int(stat.st_mtime),
+        })
+    return jsonify({"backups": backups})
+
+
+@app.post("/site-backup/create")
+def site_backup_create():
+    """Create a site backup.  body.type = website (default) | files | db | full."""
+    _verify_token()
+    backup_type = (request.json or {}).get("type", "website")
+    if backup_type not in ("website", "files", "db", "full"):
+        backup_type = "website"
+
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+
+    ts       = int(time.time())
+    filename = f"site-backup-{backup_type}-{ts}.tar.gz"
+    dest     = BACKUPS_DIR / filename
+
+    include_files  = backup_type in ("website", "files", "full")
+    include_db     = backup_type in ("website", "db", "full")
+    include_config = backup_type == "full"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        parts    = []
+
+        if include_files and PUBLIC_ROOT.exists():
+            parts.append(("files", str(PUBLIC_ROOT)))
+
+        if include_config and SECURE_ROOT.exists():
+            parts.append(("config", str(SECURE_ROOT)))
+
+        if include_db:
+            db_name, db_user, db_pass = _db_credentials()
+            dump_file = tmp_path / "database.sql"
+            env = os.environ.copy()
+            env["MYSQL_PWD"] = db_pass
+            result = subprocess.run(
+                ["mysqldump", "-u", db_user, db_name],
+                capture_output=True, env=env, timeout=120,
+            )
+            if result.returncode == 0:
+                dump_file.write_bytes(result.stdout)
+                parts.append(("database.sql", str(dump_file)))
+            else:
+                log.warning("mysqldump failed: %s", result.stderr.decode()[:200])
+
+        # Build tar.gz
+        cmd = ["tar", "-czf", str(dest)]
+        for label, path_str in parts:
+            cmd += ["-C", str(Path(path_str).parent), Path(path_str).name]
+        subprocess.run(cmd, check=True, timeout=300)
+
+    # Prune old backups
+    all_backups = sorted(BACKUPS_DIR.glob("site-backup-*.tar.gz"), key=lambda f: f.stat().st_mtime)
+    while len(all_backups) > SITE_BACKUP_MAX:
+        all_backups.pop(0).unlink(missing_ok=True)
+
+    stat = dest.stat()
+    return jsonify({"ok": True, "filename": filename, "size": stat.st_size})
+
+
+@app.delete("/site-backup/<filename>")
+def site_backup_delete(filename: str):
+    _verify_token()
+    # Sanitise — only allow safe filenames
+    if not re.match(r'^site-backup-[\w\-]+\.tar\.gz$', filename):
+        abort(400)
+    f = BACKUPS_DIR / filename
+    if f.exists():
+        f.unlink()
+    return jsonify({"ok": True})
+
+
+@app.get("/site-backup/download/<filename>")
+def site_backup_download(filename: str):
+    _verify_token()
+    if not re.match(r'^site-backup-[\w\-]+\.tar\.gz$', filename):
+        abort(400)
+    f = BACKUPS_DIR / filename
+    if not f.exists():
+        abort(404)
+    from flask import send_file
+    return send_file(str(f), as_attachment=True, download_name=filename,
+                     mimetype="application/gzip")
+
+
+# ── Security Scanner ──────────────────────────────────────────────────────────
+#
+# Called by the panel's /api/scanner/scan endpoint (admin-only).
+# Runs clamscan on the requested area and returns per-file results.
+# Also provides quarantine support for confirmed malware.
+
+QUARANTINE_DIR = Path("/var/customer/quarantine")
+QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+
+_AREA_PATHS_MAP = {
+    "public":  Path("/var/www/html"),
+    "uploads": Path("/var/customer/uploads"),
+    "private": Path("/var/customer/private"),
+}
+
+
+@app.route("/scanner/scan", methods=["POST"])
+def scanner_scan():
+    """Run ClamAV on an area and return per-file results."""
+    _verify_token()
+    body = request.get_json(force=True) or {}
+    area = body.get("area", "public")
+    if area not in _AREA_PATHS_MAP:
+        return jsonify({"error": "Invalid area"}), 400
+
+    scan_path = _AREA_PATHS_MAP[area]
+    if not scan_path.exists():
+        return jsonify({"results": [], "summary": "Directory not found"}), 200
+
+    try:
+        result = subprocess.run(
+            ["clamscan", "--recursive", "--infected", "--no-summary",
+             "--stdout", str(scan_path)],
+            capture_output=True, text=True, timeout=180,
+        )
+    except FileNotFoundError:
+        return jsonify({"error": "ClamAV (clamscan) not installed in container"}), 503
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Scan timed out (180s)"}), 504
+
+    # Parse clamscan output: "FOUND" lines = infected
+    results = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("---"):
+            continue
+        if "FOUND" in line:
+            # Format: /path/to/file: Virus.Name FOUND
+            parts = line.rsplit(":", 1)
+            filepath = parts[0].strip()
+            threat = parts[1].replace("FOUND", "").strip() if len(parts) > 1 else "Unknown"
+            results.append({
+                "file": filepath,
+                "threat": threat,
+                "area": area,
+            })
+        elif ": OK" in line:
+            filepath = line.split(":")[0].strip()
+            results.append({"file": filepath, "threat": None, "area": area})
+
+    return jsonify({"results": results, "return_code": result.returncode})
+
+
+@app.route("/scanner/quarantine", methods=["POST"])
+def scanner_quarantine():
+    """Move a file to quarantine directory."""
+    _verify_token()
+    body = request.get_json(force=True) or {}
+    area = body.get("area", "public")
+    rel_path = body.get("path", "")
+
+    if area not in _AREA_PATHS_MAP or not rel_path:
+        return jsonify({"error": "Invalid area or path"}), 400
+
+    try:
+        src = _safe_path(_AREA_PATHS_MAP[area], rel_path)
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+
+    if not src.exists():
+        return jsonify({"error": "File not found"}), 404
+
+    QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = QUARANTINE_DIR / f"{area}__{rel_path.replace('/', '__')}_{int(time.time())}"
+    shutil.move(str(src), str(dest))
+    log.warning("QUARANTINE: moved %s → %s", src, dest)
+    return jsonify({"ok": True, "quarantined_to": str(dest)})
 
 
 if __name__ == "__main__":

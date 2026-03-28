@@ -46,26 +46,105 @@ function ScoreRing({ score }) {
   );
 }
 
-function CheckRow({ check, domain, onFixed }) {
-  const [expanded, setExpanded] = useState(false);
-  const [fixing, setFixing]     = useState(false);
-  const [fixMsg, setFixMsg]     = useState('');
-  const sev = SEV[check.severity] || SEV.low;
-  const Icon = sev.icon;
+// ── Auto-fix progress card ────────────────────────────────────────────────────
+const FIX_STEPS = [
+  'Connecting to container API…',
+  'Writing security header config…',
+  'Reloading nginx…',
+  'Verifying headers…',
+];
 
-  async function autoFix() {
-    setFixing(true);
-    setFixMsg('');
+function FixProgressCard({ check, domain, onDone }) {
+  const [step,    setStep]    = useState(0);   // 0 = idle, 1-4 = in progress, 5 = done, -1 = error
+  const [errMsg,  setErrMsg]  = useState('');
+  const [result,  setResult]  = useState('');
+
+  const run = async () => {
+    setStep(1);
+    setErrMsg('');
+
+    // Simulate step progression while the request runs
+    let s = 1;
+    const tick = setInterval(() => {
+      s = Math.min(s + 1, FIX_STEPS.length);
+      setStep(s);
+    }, 600);
+
     try {
       const r = await api.post(`/api/security/fix/${domain}`, { check_id: check.id });
-      setFixMsg(r.data.message || 'Fixed');
-      onFixed?.();
+      clearInterval(tick);
+      setStep(FIX_STEPS.length + 1);  // done
+      setResult(r.data.message || 'Fix applied.');
     } catch (e) {
-      setFixMsg(e?.response?.data?.detail || 'Fix failed');
-    } finally {
-      setFixing(false);
+      clearInterval(tick);
+      setStep(-1);
+      setErrMsg(e?.response?.data?.detail || 'Auto-fix failed');
     }
+  };
+
+  // Idle state — just show the button
+  if (step === 0) {
+    return (
+      <button
+        onClick={run}
+        className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-brand/20 text-brand hover:bg-brand/35 transition-colors border border-brand/30"
+      >
+        <Zap size={10} />
+        Auto-fix
+      </button>
+    );
   }
+
+  // In-progress / done / error card
+  return (
+    <div className="mt-2 rounded-xl border border-panel-subtle bg-panel-card p-3 space-y-2 text-[11px]">
+      <div className="flex items-center gap-1.5 font-semibold text-ink-primary">
+        {step < 0 ? (
+          <X size={13} className="text-bad-light" />
+        ) : step > FIX_STEPS.length ? (
+          <CheckCircle size={13} className="text-ok" />
+        ) : (
+          <Loader size={13} className="animate-spin text-brand" />
+        )}
+        {step < 0 ? 'Fix failed' : step > FIX_STEPS.length ? 'Fix complete' : 'Applying fix…'}
+      </div>
+
+      {step > 0 && step <= FIX_STEPS.length && (
+        <div className="space-y-1">
+          {FIX_STEPS.map((label, i) => (
+            <div key={i} className={`flex items-center gap-1.5 ${i < step - 1 ? 'text-ok' : i === step - 1 ? 'text-brand' : 'text-ink-faint'}`}>
+              {i < step - 1 ? <CheckCircle size={10} /> : i === step - 1 ? <Loader size={10} className="animate-spin" /> : <div className="w-2.5 h-2.5 rounded-full border border-current opacity-30" />}
+              {label}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {step > FIX_STEPS.length && result && (
+        <p className="text-ok whitespace-pre-wrap text-[10px]">{result}</p>
+      )}
+
+      {step < 0 && errMsg && (
+        <p className="text-bad-light">{errMsg}</p>
+      )}
+
+      {(step > FIX_STEPS.length || step < 0) && (
+        <button
+          onClick={() => { setStep(0); onDone?.(); }}
+          className="w-full py-1 rounded-lg bg-ok/10 hover:bg-ok/20 text-ok text-[11px] font-semibold transition-colors border border-ok/25"
+        >
+          Done
+        </button>
+      )}
+    </div>
+  );
+}
+
+function CheckRow({ check, domain, onFixed }) {
+  const [expanded, setExpanded]       = useState(false);
+  const [showFixCard, setShowFixCard] = useState(false);
+  const sev = SEV[check.severity] || SEV.low;
+  const Icon = sev.icon;
 
   return (
     <div className={`rounded-lg border p-3 ${sev.bg}`}>
@@ -75,13 +154,12 @@ function CheckRow({ check, domain, onFixed }) {
           <div className="flex items-center gap-2 justify-between">
             <span className="text-sm font-medium text-gray-200">{check.title}</span>
             <div className="flex items-center gap-1.5 flex-shrink-0">
-              {check.auto_fixable && check.severity !== 'pass' && (
+              {check.auto_fixable && check.severity !== 'pass' && !showFixCard && (
                 <button
-                  onClick={autoFix}
-                  disabled={fixing}
-                  className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-brand-600/30 text-brand-300 hover:bg-brand-600/50 transition-colors"
+                  onClick={() => setShowFixCard(true)}
+                  className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-brand/20 text-brand hover:bg-brand/35 transition-colors border border-brand/30"
                 >
-                  {fixing ? <Loader size={10} className="animate-spin" /> : <Zap size={10} />}
+                  <Zap size={10} />
                   Auto-fix
                 </button>
               )}
@@ -93,10 +171,12 @@ function CheckRow({ check, domain, onFixed }) {
             </div>
           </div>
           <p className="text-xs text-gray-400 mt-0.5">{check.message}</p>
-          {fixMsg && (
-            <p className={`text-xs mt-1 ${fixMsg.includes('fail') ? 'text-red-400' : 'text-green-400'}`}>
-              {fixMsg}
-            </p>
+          {showFixCard && (
+            <FixProgressCard
+              check={check}
+              domain={domain}
+              onDone={() => { setShowFixCard(false); onFixed?.(); }}
+            />
           )}
         </div>
       </div>

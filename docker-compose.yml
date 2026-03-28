@@ -238,6 +238,7 @@ services:
       - /var/webpanel/panel_ssh:/var/webpanel/panel_ssh  # panel SSH keypair for container access
       - /var/webpanel/app-cache:/var/webpanel/app-cache  # marketplace app cache
       - /var/webpanel/localdns:/var/webpanel/localdns    # localdns hosts file (written by panel, read by dnsmasq)
+      - ./docker/traefik/dynamic:/app/traefik_dynamic   # panel writes per-domain IP block configs; Traefik reads them
     environment:
       - SECRET_KEY=${SECRET_KEY:-change_me_in_production}
       - SERVER_IP=${SERVER_IP}
@@ -254,6 +255,7 @@ services:
       - CONTAINER_API_TOKEN=${CONTAINER_API_TOKEN:-}
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-changeme_mysql_root}
       - LOCALDNS_HOSTS_FILE=/var/webpanel/localdns/panel.hosts
+      - TRAEFIK_DYNAMIC_DIR=/app/traefik_dynamic
     depends_on:
       mysql:
         condition: service_healthy

@@ -1,7 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { HardDrive, History, Plus, Trash2, Download, RefreshCw, AlertTriangle, Loader } from 'lucide-react';
+import { HardDrive, History, Plus, Trash2, Download, RefreshCw, AlertTriangle, Loader, Globe, Database, FolderOpen, PackageOpen } from 'lucide-react';
 import api from '../utils/api';
 import ConfigBackupsPanel from '../components/ConfigBackupsPanel';
+
+const BACKUP_TYPES = [
+  { id: 'website', label: 'Full Website',   icon: Globe,        desc: 'Web files + database dump' },
+  { id: 'files',   label: 'Files Only',     icon: FolderOpen,   desc: 'Web root files only' },
+  { id: 'db',      label: 'Database Only',  icon: Database,     desc: 'MariaDB dump only' },
+  { id: 'full',    label: 'Complete Domain', icon: PackageOpen, desc: 'Files + DB + all config' },
+];
 
 function fmtBytes(b) {
   if (b == null) return '—';
@@ -18,6 +25,7 @@ export default function BackupsPage() {
   const [domains,        setDomains]        = useState([]);
   const [selectedDomain, setSelectedDomain] = useState('');
   const [tab,            setTab]            = useState('config');
+  const [backupType,     setBackupType]     = useState('website');
 
   // Full-site backup state
   const [backups,       setBackups]       = useState([]);
@@ -59,7 +67,7 @@ export default function BackupsPage() {
     // Start elapsed-time ticker
     timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
     try {
-      const r = await api.post(`/api/container/${selectedDomain}/site-backup/create`);
+      const r = await api.post(`/api/container/${selectedDomain}/site-backup/create`, { type: backupType });
       setMsg(`Backup created: ${r.data.filename} (${fmtBytes(r.data.size)})`);
       loadBackups();
     } catch (e) {
@@ -136,10 +144,29 @@ export default function BackupsPage() {
 
       {tab === 'fullsite' && (
         <div className="space-y-3">
+          {/* Backup type selector */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {BACKUP_TYPES.map(bt => (
+              <button
+                key={bt.id}
+                onClick={() => setBackupType(bt.id)}
+                className={`flex flex-col items-start gap-1 p-3 rounded-xl border text-left transition-all ${
+                  backupType === bt.id
+                    ? 'bg-brand/10 border-brand/30 text-brand'
+                    : 'bg-panel-elevated/30 border-panel-subtle text-ink-muted hover:border-brand/20'
+                }`}
+              >
+                <bt.icon size={14} className={backupType === bt.id ? 'text-brand' : ''} />
+                <span className="text-[11px] font-semibold">{bt.label}</span>
+                <span className="text-[10px] text-ink-faint">{bt.desc}</span>
+              </button>
+            ))}
+          </div>
+
           {/* Toolbar */}
           <div className="flex items-center justify-between">
             <p className="text-[12px] text-ink-muted">
-              Backups are stored inside the domain container and include the full web root + database dump.
+              Backups stored in container — max 10 kept per domain.
             </p>
             <div className="flex gap-2">
               <button
@@ -161,7 +188,7 @@ export default function BackupsPage() {
                     Backing up… {elapsed}s
                   </>
                 ) : (
-                  <><Plus size={13} /> Create Backup</>
+                  <><Plus size={13} /> Create {BACKUP_TYPES.find(b => b.id === backupType)?.label} Backup</>
                 )}
               </button>
             </div>

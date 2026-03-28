@@ -292,6 +292,8 @@ export default function Dashboard() {
   const cpu  = stats?.cpu_percent  ?? 0;
   const mem  = stats?.mem_percent  ?? 0;
   const disk = stats?.disk_percent ?? 0;
+  const externalIp   = stats?.external_ip    ?? '—';
+  const internalIps  = stats?.internal_ips   ?? [];
   const swap = stats?.swap_percent ?? 0;
   const netSent = stats?.net_sent_mb ?? 0;
   const netRecv = stats?.net_recv_mb ?? 0;
@@ -410,6 +412,19 @@ export default function Dashboard() {
         <div className="panel p-4">
           <h2 className="text-[12px] font-semibold text-ink-muted uppercase tracking-wider mb-3">Network</h2>
           <div className="space-y-2.5">
+            {/* External / Internal IP */}
+            <div className="rounded-lg border border-panel-subtle overflow-hidden">
+              <div className="flex items-center justify-between px-3 py-2 bg-panel-elevated/60 border-b border-panel-subtle">
+                <span className="text-[11px] text-ink-muted font-medium">External IP</span>
+                <span className="text-[12px] font-mono font-semibold text-ok-light">{externalIp}</span>
+              </div>
+              {internalIps.slice(0, 3).map(ip => (
+                <div key={ip} className="flex items-center justify-between px-3 py-1.5 border-b border-panel-subtle last:border-0">
+                  <span className="text-[11px] text-ink-muted">Internal</span>
+                  <span className="text-[12px] font-mono text-ink-secondary">{ip}</span>
+                </div>
+              ))}
+            </div>
             {/* Totals */}
             <div className="grid grid-cols-2 gap-2">
               <div className="flex items-center gap-2 bg-panel-elevated rounded-lg p-2.5">

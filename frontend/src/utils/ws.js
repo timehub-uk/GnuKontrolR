@@ -19,7 +19,11 @@ const PING_TIMEOUT_MS = 5_000;   // close if no pong within 5 s
  */
 export function createWS(path, onMessage, onClose, onOpen) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const url   = `${proto}://${location.host}${path}`;
+  // Attach auth token as ?token= query param so protected WS endpoints can validate
+  const token = localStorage.getItem('access_token');
+  const sep   = path.includes('?') ? '&' : '?';
+  const authedPath = token ? `${path}${sep}token=${encodeURIComponent(token)}` : path;
+  const url   = `${proto}://${location.host}${authedPath}`;
 
   let ws;
   let retryMs       = MIN_RETRY_MS;

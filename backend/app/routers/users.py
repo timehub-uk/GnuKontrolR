@@ -75,13 +75,18 @@ async def get_user(user_id: int, db: AsyncSession = Depends(get_db), _=Depends(r
 
 
 @router.patch("/{user_id}")
-async def update_user(user_id: int, body: UserUpdate, db: AsyncSession = Depends(get_db), _=Depends(require_admin)):
+async def update_user(user_id: int, body: UserUpdate, db: AsyncSession = Depends(get_db), current=Depends(require_admin)):
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(404, "User not found")
     email_changed = body.email is not None and body.email != user.email
     for field, val in body.model_dump(exclude_none=True).items():
+        if field == "role":
+            # Only superadmin can grant or revoke the superadmin role
+            from app.models.user import Role as _Role
+            if (val == _Role.superadmin or user.role == _Role.superadmin) and current.role != _Role.superadmin:
+                raise HTTPException(403, "Only a superadmin can change the superadmin role")
         if field == "password":
             setattr(user, "hashed_password", hash_password(val))
         else:

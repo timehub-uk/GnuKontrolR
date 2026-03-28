@@ -263,7 +263,24 @@ async def status_json(_=Depends(require_admin)):
 
 
 @router.websocket("/ws/stats")
-async def ws_stats(websocket: WebSocket):
+async def ws_stats(websocket: WebSocket, token: str = ""):
+    """Live stats stream — requires a valid JWT as ?token= query param."""
+    from typing import Optional as _Opt
+    from fastapi import Query as _Query
+    from jose import JWTError as _JWTError, jwt as _jwt
+    from app.auth import SECRET_KEY as _SK, ALGORITHM as _ALG
+    # Validate token before accepting connection
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    try:
+        payload = _jwt.decode(token, _SK, algorithms=[_ALG])
+        if payload.get("type") != "access":
+            raise ValueError("not an access token")
+    except Exception:
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+
     await websocket.accept()
     loop = asyncio.get_running_loop()
     try:

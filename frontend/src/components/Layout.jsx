@@ -6,7 +6,7 @@ import {
   FolderOpen, Database, Mail, ShieldCheck, ScrollText,
   HardDrive, Terminal, Settings, LogOut,
   Package, Eye, Activity, Shield, ChevronRight, ChevronLeft, Cpu,
-  LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit, Stethoscope, Bell,
+  LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit, Stethoscope, Bell, Network,
 } from 'lucide-react';
 import AiPanel from './AiPanel';
 import CommandPalette from './CommandPalette';
@@ -64,6 +64,12 @@ const NAV_GROUPS = [
     ],
   },
   {
+    label: 'Infrastructure',
+    items: [
+      { to: '/networking', icon: Network, label: 'Networking', adminOnly: true },
+    ],
+  },
+  {
     label: 'Security',
     items: [
       { to: '/security',      icon: Shield,   label: 'Security'      },
@@ -90,6 +96,7 @@ const ROUTE_LABELS = {
   '/security': 'Security', '/activity-log': 'Activity Log', '/admin-content': 'Content Viewer',
   '/users': 'Users', '/settings': 'Settings', '/ai-admin': 'AI Admin',
   '/diagnostic': 'Diagnostic', '/notifications': 'Notifications',
+  '/networking': 'Networking',
 };
 
 // ── NavItem — full or icon-only ───────────────────────────────────────────────

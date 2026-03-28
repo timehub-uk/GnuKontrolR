@@ -36,7 +36,12 @@ async def _check_ssl(domain: str) -> dict:
         conn.connect((domain, 443))
         cert = conn.getpeercert()
         conn.close()
-        expires = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+        try:
+            expires = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+        except ValueError:
+            # Some certs use a slightly different format; treat as unknown expiry
+            return {"id": "ssl_expiry", "severity": "warn", "title": "SSL Certificate Expiry Unknown",
+                    "message": "Could not parse certificate expiry date.", "auto_fixable": False}
         days_left = (expires - datetime.now(timezone.utc)).days
         if days_left < 7:
             return {"id": "ssl_expiry", "severity": "critical", "title": "SSL Certificate Expiring",
@@ -256,53 +261,105 @@ class FixRequest(BaseModel):
     check_id: str
 
 
-AUTO_FIX_NGINX_HEADERS = {
-    "header_x-frame-options":        'add_header X-Frame-Options "SAMEORIGIN" always;',
-    "header_x-content-type-options": 'add_header X-Content-Type-Options "nosniff" always;',
-    "header_referrer-policy":        'add_header Referrer-Policy "strict-origin-when-cross-origin" always;',
-    "header_permissions-policy":     'add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;',
-    "header_csp":                    'add_header Content-Security-Policy "default-src \'self\'; script-src \'self\'; style-src \'self\' \'unsafe-inline\';" always;',
-    "header_hsts":                   'add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;',
+# All security headers applied together — idempotent, safe to rewrite every time.
+_SECURITY_HEADERS_NGINX = """\
+add_header X-Frame-Options "SAMEORIGIN" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none';" always;
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+add_header Cross-Origin-Opener-Policy "same-origin" always;
+add_header Cross-Origin-Resource-Policy "same-site" always;
+"""
+
+_HEADER_CHECK_IDS = {
+    "header_x-frame-options", "header_x-content-type-options",
+    "header_referrer-policy", "header_permissions-policy",
+    "header_csp", "header_hsts",
 }
 
+_CONTAINER_API_PORT = 9000
 
-@router.post("/fix/{domain}")
-async def auto_fix(domain: str, body: FixRequest, _=Depends(require_admin)):
-    check_id = body.check_id
 
-    # Header fixes — inject via container API secure nginx area
-    if check_id in AUTO_FIX_NGINX_HEADERS:
-        import httpx
-        container = "site_" + domain.replace(".", "_").replace("-", "_")
-        header_line = AUTO_FIX_NGINX_HEADERS[check_id]
-        # Append to existing header conf fragment
-        fragment = "\n".join(AUTO_FIX_NGINX_HEADERS[k] for k in AUTO_FIX_NGINX_HEADERS if k.startswith("header_"))
-        try:
-            async with httpx.AsyncClient(timeout=10, verify=False) as c:
-                r = await c.post(
-                    f"https://{container}:9000/secure/nginx",
-                    json={"name": "security_headers", "content": fragment},
-                    headers={"Authorization": f"Bearer {_get_token()}"},
-                )
-                r.raise_for_status()
-            return {"ok": True, "message": f"Security headers applied to {domain}. Nginx reloaded."}
-        except Exception as e:
-            raise HTTPException(500, f"Auto-fix failed: {e}")
-
-    # Container start
-    if check_id == "container_running":
-        name = "site_" + domain.replace(".", "_").replace("-", "_")
-        r = subprocess.run(["docker", "start", name], capture_output=True, text=True, timeout=15)
-        if r.returncode != 0:
-            raise HTTPException(500, r.stderr)
-        return {"ok": True, "message": f"Container {name} started."}
-
-    raise HTTPException(400, f"No auto-fix available for check: {check_id}")
+def _container_url(domain: str, path: str) -> str:
+    container = "site_" + domain.replace(".", "_").replace("-", "_")
+    return f"https://{container}:{_CONTAINER_API_PORT}{path}"
 
 
 def _get_token() -> str:
     import os
     return os.environ.get("CONTAINER_API_TOKEN", "")
+
+
+async def _assert_domain_owner(domain: str, user: User, db) -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy import select as _sel
+    if user.role in (Role.superadmin, Role.admin):
+        return
+    result = await db.execute(
+        _sel(Domain).where(Domain.name == domain, Domain.owner_id == user.id)
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(403, "Access denied: domain not owned by you")
+
+
+@router.post("/fix/{domain}")
+async def auto_fix(
+    domain: str,
+    body: FixRequest,
+    current: User = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Apply an auto-fix for a security check.  Domain owners can fix their own domains."""
+    await _assert_domain_owner(domain, current, db)
+
+    check_id = body.check_id
+
+    # ── Any missing security header → apply the full hardened header set ──────
+    if check_id in _HEADER_CHECK_IDS:
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=15, verify=False) as c:
+                r = await c.post(
+                    _container_url(domain, "/secure/nginx"),
+                    json={"name": "security_headers", "content": _SECURITY_HEADERS_NGINX},
+                    headers={"Authorization": f"Bearer {_get_token()}"},
+                )
+                if r.status_code not in (200, 201):
+                    raise HTTPException(500, f"Container API error {r.status_code}: {r.text[:200]}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Could not reach container API: {e}")
+
+        return {
+            "ok": True,
+            "applied": list(_HEADER_CHECK_IDS),
+            "message": (
+                f"All security headers applied to {domain}.\n"
+                "Headers: X-Frame-Options, X-Content-Type-Options, Referrer-Policy, "
+                "Permissions-Policy, Content-Security-Policy, HSTS, COOP, CORP.\n"
+                "Nginx reloaded inside container."
+            ),
+        }
+
+    # ── Container not running ─────────────────────────────────────────────────
+    if check_id == "container_running":
+        name = "site_" + domain.replace(".", "_").replace("-", "_")
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["docker", "start", name],
+                capture_output=True, text=True, timeout=15,
+            ),
+        )
+        if result.returncode != 0:
+            raise HTTPException(500, f"docker start failed: {result.stderr}")
+        return {"ok": True, "message": f"Container {name} started."}
+
+    raise HTTPException(400, f"No auto-fix available for check_id: {check_id!r}")
 
 
 # ── Global threat intelligence (CISA KEV) ─────────────────────────────────────

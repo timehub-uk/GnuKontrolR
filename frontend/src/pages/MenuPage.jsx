@@ -197,6 +197,12 @@ const MENU = [
     icon: IconContainer,
     items: [
       {
+        to: '/networking', icon: IconNetwork, label: 'Networking',
+        description: 'IP blocking, firewall, country geo-blocking.',
+        details: 'Manage IP ban lists, per-domain country blocking with flag-based country selector, firewall rules, and the full API endpoint reference. Master IPs (Docker bridge + server external) are always whitelisted.',
+        adminOnly: true,
+      },
+      {
         to: '/docker', icon: IconContainer, label: 'Containers',
         description: 'Manage Docker containers per domain.',
         details: 'Each domain runs in a fully isolated Docker container with its own file system, ports and resources. Create, start, stop and inspect containers, view real-time logs, and manage port assignments.',
@@ -362,8 +368,14 @@ function SubItem({ to, icon: Icon, label, description, details, accent, onShowCa
         onClick={() => navigate(to)}
         className="w-full flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-white/5 active:scale-95 transition-all"
       >
-        <div className="w-10 h-10 rounded-xl bg-panel-700/60 border border-panel-600 flex items-center justify-center group-hover:border-panel-500 transition-colors">
-          <Icon size={18} className={`${accent} opacity-80 group-hover:opacity-100`} />
+        {/* Icon with inside-out pulse on hover */}
+        <div className="relative w-10 h-10 flex items-center justify-center">
+          {/* Pulse rings — scale outward from centre on hover */}
+          <span className="absolute inset-0 rounded-xl opacity-0 group-hover:opacity-100 group-hover:animate-[ping_1s_ease-out_infinite] bg-current" style={{ color: 'var(--color-brand, #6366f1)', opacity: 0 }} />
+          <span className="absolute inset-0 rounded-xl opacity-0 group-hover:opacity-40 group-hover:animate-[ping_1s_ease-out_0.3s_infinite] bg-current" style={{ color: 'var(--color-brand, #6366f1)' }} />
+          <div className="relative w-10 h-10 rounded-xl bg-panel-700/60 border border-panel-600 flex items-center justify-center group-hover:border-panel-500 group-hover:bg-panel-600/80 transition-all duration-200 z-10">
+            <Icon size={18} className={`${accent} opacity-80 group-hover:opacity-100 transition-opacity`} />
+          </div>
         </div>
         <span className="text-xs text-gray-400 group-hover:text-gray-200 text-center leading-tight transition-colors">
           {label}

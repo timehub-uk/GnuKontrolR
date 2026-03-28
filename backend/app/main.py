@@ -40,7 +40,7 @@ if _DEBUG_LEVEL >= 5:
 # ─────────────────────────────────────────────────────────────────────────────
 
 from app.database import init_db
-from app.routers import auth, users, domains, server, docker_mgr, services, admin_content, container_proxy, security, activity_log, marketplace, ai, ai_admin, terminal, system_logs, dns, dns_sync, localdns, notifications
+from app.routers import auth, users, domains, server, docker_mgr, services, admin_content, container_proxy, security, activity_log, marketplace, ai, ai_admin, terminal, system_logs, dns, dns_sync, localdns, notifications, ip_rules, geo, scanner, email_security
 
 
 # Prometheus metrics
@@ -166,11 +166,24 @@ async def _request_lifecycle(request: Request, call_next):
     # Propagate the event ID back
     response.headers["X-Request-ID"] = event_id
 
-    # Security headers
-    response.headers["X-Content-Type-Options"]    = "nosniff"
-    response.headers["X-Frame-Options"]           = "DENY"
-    response.headers["Referrer-Policy"]           = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"]        = "camera=(), microphone=(), geolocation=()"
+    # Security headers (applied to every response including the SPA)
+    response.headers["X-Content-Type-Options"]         = "nosniff"
+    response.headers["X-Frame-Options"]                = "DENY"
+    response.headers["Referrer-Policy"]                = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"]             = "camera=(), microphone=(), geolocation=(), payment=()"
+    response.headers["Cross-Origin-Opener-Policy"]     = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"]   = "same-site"
+    response.headers["Cross-Origin-Embedder-Policy"]   = "require-corp"
+    # CSP — allow self + inline styles (Tailwind/framer-motion) + data: images
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "font-src 'self' data:; "
+        "connect-src 'self' wss: ws:; "
+        "frame-ancestors 'none';"
+    )
     if _IS_PRODUCTION:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
 
@@ -232,6 +245,10 @@ app.include_router(dns.router)
 app.include_router(dns_sync.router)
 app.include_router(localdns.router)
 app.include_router(notifications.router)
+app.include_router(ip_rules.router)
+app.include_router(geo.router)
+app.include_router(scanner.router)
+app.include_router(email_security.router)
 
 
 @app.get("/api/metrics", include_in_schema=False)

@@ -2,12 +2,20 @@
 import asyncio
 import logging
 import os
+import re as _re
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
+
+# Valid RFC-1123 hostname pattern — no path traversal, no shell metacharacters
+_VALID_DOMAIN_RE = _re.compile(
+    r'^(?!-)[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?'
+    r'(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$'
+)
+_VALID_PHP_VERSIONS = {"8.1", "8.2", "8.3", "8.4"}
 
 from app.database import get_db
 from app.dns_helper import deprovision_domain_dns, provision_domain_dns
@@ -111,6 +119,11 @@ async def list_domains(db: AsyncSession = Depends(get_db), current: User = Depen
 
 @router.post("/", status_code=201)
 async def create_domain(body: DomainCreate, db: AsyncSession = Depends(get_db), current: User = Depends(get_current_user)):
+    # Validate domain name format
+    if not _VALID_DOMAIN_RE.match(body.name) or len(body.name) > 253:
+        raise HTTPException(400, "Invalid domain name: must be a valid RFC-1123 hostname")
+    if body.php_version not in _VALID_PHP_VERSIONS:
+        raise HTTPException(400, f"Invalid PHP version. Allowed: {sorted(_VALID_PHP_VERSIONS)}")
     # Check quota
     result = await db.execute(select(Domain).where(Domain.owner_id == current.id))
     owned = len(result.scalars().all())

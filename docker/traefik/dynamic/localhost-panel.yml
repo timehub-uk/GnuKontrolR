@@ -1,0 +1,24 @@
+# ── Local access — HTTPS on localhost and 127.0.0.1 ──────────────────────────
+#
+# Lets you reach the panel via https://localhost without needing to set a
+# PANEL_DOMAIN entry in /etc/hosts.  The self-signed cert from local.crt
+# is used (sniStrict: false allows this even without SNI).
+#
+# Accept browser TLS warning once, or trust the cert with:
+#   mkcert -install   (then re-run setup.sh to regenerate local.crt)
+# ─────────────────────────────────────────────────────────────────────────────
+
+http:
+  routers:
+    webpanel-localhost:
+      rule: "Host(`localhost`) || Host(`127.0.0.1`)"
+      entryPoints:
+        - websecure
+      service: webpanel-local-svc
+      tls: {}   # uses defaultCertificate from local-tls.yml
+
+  services:
+    webpanel-local-svc:
+      loadBalancer:
+        servers:
+          - url: "http://webpanel:8000"
