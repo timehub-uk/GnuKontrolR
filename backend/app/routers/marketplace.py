@@ -27,8 +27,10 @@ import urllib.request
 from pathlib import Path
 
 from datetime import datetime
+from sqlalchemy import select, delete
 from app.auth import get_current_user, require_admin
-from app.database import get_db as get_db_dep
+from app.database import get_db as get_db_dep, AsyncSession
+from app.models.installed_app import InstalledApp
 from app.routers.container_proxy import _container_api_url, _TLS_VERIFY
 from app.dns_helper import register_vdns
 import httpx
@@ -355,8 +357,51 @@ async def list_apps(_user=Depends(get_current_user)):
     return APP_CATALOG
 
 
+@router.get("/my-installs")
+async def list_my_installs(user=Depends(get_current_user), db: AsyncSession = Depends(get_db_dep)):
+    """Return all apps installed by the current user across all their domains."""
+    from app.models.user import Role
+    if user.role in (Role.superadmin, Role.admin):
+        result = await db.execute(select(InstalledApp).order_by(InstalledApp.installed_at.desc()))
+    else:
+        result = await db.execute(
+            select(InstalledApp)
+            .where(InstalledApp.owner_id == user.id)
+            .order_by(InstalledApp.installed_at.desc())
+        )
+    rows = result.scalars().all()
+    return [
+        {
+            "id": r.id, "owner_id": r.owner_id, "domain_name": r.domain_name,
+            "app_id": r.app_id, "app_name": r.app_name, "app_version": r.app_version,
+            "install_path": r.install_path, "vdns": r.vdns, "admin_url": r.admin_url,
+            "status": r.status, "installed_at": r.installed_at, "updated_at": r.updated_at,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/installed/{domain}")
-async def list_installed(domain: str, _user=Depends(get_current_user)):
+async def list_installed(domain: str, user=Depends(get_current_user), db: AsyncSession = Depends(get_db_dep)):
+    """List installed apps for a domain — DB-backed with container fallback."""
+    result = await db.execute(
+        select(InstalledApp)
+        .where(InstalledApp.domain_name == domain, InstalledApp.status != "removed")
+        .order_by(InstalledApp.installed_at.desc())
+    )
+    db_rows = result.scalars().all()
+    if db_rows:
+        return {
+            "apps": [
+                {
+                    "app_id": r.app_id, "name": r.app_name, "version": r.app_version,
+                    "path": r.install_path, "vdns": r.vdns, "admin_url": r.admin_url,
+                    "status": r.status, "installed_at": str(r.installed_at),
+                }
+                for r in db_rows
+            ]
+        }
+    # Fall back to container API for legacy installs not yet in DB
     url = _container_api_url(domain, "/install/list")
     async with panel_client(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
         try:
@@ -380,7 +425,7 @@ class InstallRequest(BaseModel):
 
 
 @router.post("/install")
-async def start_install(req: InstallRequest, user=Depends(get_current_user)):
+async def start_install(req: InstallRequest, user=Depends(get_current_user), db: AsyncSession = Depends(get_db_dep)):
     if req.app_id not in APP_CATALOG:
         raise HTTPException(400, f"Unknown app: {req.app_id}")
 
@@ -418,6 +463,31 @@ async def start_install(req: InstallRequest, user=Depends(get_current_user)):
             # accessible as {app_id}.{domain} from outside the server.
             vdns_host = await register_vdns(req.domain, req.app_id)
             vdns_url  = f"https://{vdns_host}"
+
+            # Persist installation record to DB (upsert: remove old, insert new)
+            try:
+                await db.execute(
+                    delete(InstalledApp).where(
+                        InstalledApp.domain_name == req.domain,
+                        InstalledApp.app_id == req.app_id,
+                    )
+                )
+                record = InstalledApp(
+                    owner_id     = user.id,
+                    domain_name  = req.domain,
+                    app_id       = req.app_id,
+                    app_name     = app.get("name", req.app_id),
+                    app_version  = app.get("version"),
+                    install_path = req.install_path,
+                    vdns         = vdns_url,
+                    admin_url    = data.get("result", {}).get("admin_url") if isinstance(data.get("result"), dict) else None,
+                    status       = "installed",
+                )
+                db.add(record)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+
             # Return job_id plus the generated credentials so the frontend can display them
             return {
                 **data,
@@ -448,18 +518,27 @@ async def install_status(domain: str, job_id: str, _user=Depends(get_current_use
 
 
 @router.delete("/installed/{domain}/{app_id}")
-async def remove_app(domain: str, app_id: str, _user=Depends(get_current_user)):
+async def remove_app(domain: str, app_id: str, _user=Depends(get_current_user), db: AsyncSession = Depends(get_db_dep)):
     """Remove an installed app from the domain container."""
     url = _container_api_url(domain, f"/install/{app_id}")
     async with panel_client(verify=_TLS_VERIFY, timeout=TIMEOUT) as c:
         try:
             r = await c.delete(url, headers={"Authorization": f"Bearer {_get_token(domain)}"})
             r.raise_for_status()
-            return r.json()
         except httpx.HTTPStatusError as e:
             raise HTTPException(e.response.status_code, e.response.text)
         except Exception as e:
             raise HTTPException(502, str(e))
+    # Mark as removed in DB
+    result = await db.execute(
+        select(InstalledApp).where(InstalledApp.domain_name == domain, InstalledApp.app_id == app_id)
+    )
+    row = result.scalar_one_or_none()
+    if row:
+        row.status = "removed"
+        row.updated_at = datetime.utcnow()
+        await db.commit()
+    return {"ok": True}
 
 
 @router.post("/installed/{domain}/{app_id}/repair")

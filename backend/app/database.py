@@ -22,6 +22,6 @@ async def get_db():
 
 
 async def init_db():
-    from app.models import user, domain, container_port, request_log, ai_provider, app_cache  # noqa — registers models
+    from app.models import user, domain, container_port, request_log, ai_provider, app_cache, installed_app  # noqa — registers models
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

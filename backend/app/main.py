@@ -50,9 +50,54 @@ _mem_gauge   = Gauge("webpanel_host_mem_percent",  "Host memory usage %")
 _disk_gauge  = Gauge("webpanel_host_disk_percent", "Host disk usage %")
 
 
+async def _sync_acme_email() -> None:
+    """Read the superadmin's email from the DB and write it to .env as ACME_EMAIL.
+
+    Traefik reads ACME_EMAIL from its environment (passed via docker-compose).
+    This keeps the LE account email in sync with whoever owns the panel.
+    """
+    try:
+        from app.database import AsyncSessionLocal
+        from app.models.user import User, Role
+        from sqlalchemy import select as _select
+        import re as _re
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                _select(User).where(User.role == Role.superadmin, User.is_active == True).limit(1)
+            )
+            admin = result.scalar_one_or_none()
+            if not admin or not admin.email or "@" not in admin.email:
+                return
+            email = admin.email
+
+        env_path = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+        env_path = os.path.normpath(env_path)
+        if not os.path.exists(env_path):
+            return
+
+        with open(env_path) as f:
+            content = f.read()
+
+        if f"ACME_EMAIL={email}" in content:
+            return  # already set
+
+        new_content = _re.sub(r"^ACME_EMAIL=.*$", f"ACME_EMAIL={email}", content, flags=_re.MULTILINE)
+        if new_content == content:
+            new_content += f"\nACME_EMAIL={email}\n"
+
+        with open(env_path, "w") as f:
+            f.write(new_content)
+
+        logging.getLogger("webpanel").info("ACME_EMAIL synced to %s from superadmin DB record", email)
+    except Exception as exc:
+        logging.getLogger("webpanel").warning("ACME_EMAIL sync failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await _sync_acme_email()
     # Start DNS sync background task (reconciles DB ↔ PowerDNS every 180 s)
     task = asyncio.create_task(dns_sync.dns_sync_loop(interval=180))
     yield

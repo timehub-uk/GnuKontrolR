@@ -11,12 +11,15 @@ Entries are stored in the database (RequestLog model) and include:
   - duration (ms)
   - IP address (hashed for privacy)
 """
+import asyncio
 import hashlib
+import json
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Optional, AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, delete
 
 from app.auth import get_current_user, require_admin
@@ -40,7 +43,7 @@ async def record_request(
     ip_hash: str,
 ):
     """Append one entry and prune to LOG_RETENTION rows for this user."""
-    db.add(RequestLog(
+    entry = RequestLog(
         user_id     = user_id,
         event_id    = event_id,
         method      = method,
@@ -49,8 +52,15 @@ async def record_request(
         duration_ms = round(duration_ms, 1),
         ip_hash     = ip_hash,
         created_at  = datetime.utcnow(),
-    ))
+    )
+    db.add(entry)
     await db.commit()
+    # Push to any connected SSE clients for this user
+    _sse_broadcast(user_id, {
+        "event_id": event_id, "method": method, "path": path,
+        "status": status, "duration_ms": round(duration_ms, 1),
+        "timestamp": entry.created_at.isoformat(),
+    })
 
     # Prune: keep only the most recent LOG_RETENTION entries for this user
     subq = (
@@ -134,3 +144,50 @@ def _serialize(entry: RequestLog) -> dict:
         "ip_hash":     entry.ip_hash,
         "timestamp":   entry.created_at.isoformat(),
     }
+
+
+# ── In-memory SSE broadcast bus ───────────────────────────────────────────────
+# Each connected SSE client is represented by an asyncio.Queue.
+_SSE_CLIENTS: dict[int, list[asyncio.Queue]] = {}   # user_id → list of queues
+
+
+def _sse_broadcast(user_id: int, event: dict) -> None:
+    """Push *event* to all SSE clients subscribed for *user_id*."""
+    for q in _SSE_CLIENTS.get(user_id, []):
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
+
+
+async def _sse_generator(user_id: int, queue: asyncio.Queue) -> AsyncGenerator[str, None]:
+    """Yield SSE-formatted lines, keeping the connection alive with pings."""
+    yield "retry: 3000\n\n"   # tell the browser to retry after 3 s on disconnect
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=15)
+                yield f"data: {json.dumps(event)}\n\n"
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"   # keep-alive comment line
+    except asyncio.CancelledError:
+        pass
+    finally:
+        queues = _SSE_CLIENTS.get(user_id, [])
+        if queue in queues:
+            queues.remove(queue)
+
+
+@router.get("/stream")
+async def stream_activity(user: User = Depends(get_current_user)):
+    """SSE endpoint — streams new activity log events to the browser in real time."""
+    queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _SSE_CLIENTS.setdefault(user.id, []).append(queue)
+    return StreamingResponse(
+        _sse_generator(user.id, queue),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx buffering
+        },
+    )

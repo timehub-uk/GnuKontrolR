@@ -33,6 +33,7 @@ class Domain(Base):
     ssl_expires = Column(DateTime, nullable=True)
     php_version = Column(String(16), default="8.2")
     redirect_to = Column(String(512), nullable=True)
+    acme_email  = Column(String(128), nullable=True)   # domain owner's email — used as ACME/LE contact
     created_at  = Column(DateTime, default=datetime.utcnow)
     updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

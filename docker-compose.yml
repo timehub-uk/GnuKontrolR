@@ -84,6 +84,7 @@ services:
       - traefik.http.routers.traefik-dash.service=api@internal
     environment:
       - TZ=${TZ:-UTC}
+      - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
     depends_on:
       - docker-api-proxy
 

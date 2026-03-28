@@ -80,12 +80,22 @@ async def update_user(user_id: int, body: UserUpdate, db: AsyncSession = Depends
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(404, "User not found")
+    email_changed = body.email is not None and body.email != user.email
     for field, val in body.model_dump(exclude_none=True).items():
         if field == "password":
             setattr(user, "hashed_password", hash_password(val))
         else:
             setattr(user, field, val)
     await db.commit()
+    # If a superadmin's email was changed, re-sync ACME_EMAIL in .env
+    from app.models.user import Role as _Role
+    if email_changed and user.role == _Role.superadmin:
+        try:
+            from app.main import _sync_acme_email
+            import asyncio as _asyncio
+            _asyncio.create_task(_sync_acme_email())
+        except Exception:
+            pass
     return {"ok": True}
 
 

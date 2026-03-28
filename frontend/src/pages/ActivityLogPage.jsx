@@ -3,12 +3,13 @@
  * Shows every API call the current user made, with event ID, status,
  * plain-English error descriptions, and suggested fixes.
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   ScrollText, RefreshCw, Trash2, CheckCircle,
-  AlertCircle, AlertTriangle, Info, Clock, Hash,
+  AlertCircle, AlertTriangle, Info, Clock, Hash, Radio,
 } from 'lucide-react';
 import api from '../utils/api';
+import { createSSE } from '../utils/sse';
 
 // ── Human-readable status explanations ───────────────────────────────────────
 const STATUS_INFO = {
@@ -159,6 +160,8 @@ export default function ActivityLogPage() {
   const [loading,  setLoading]  = useState(true);
   const [clearing, setClearing] = useState(false);
   const [error,    setError]    = useState('');
+  const [live,     setLive]     = useState(true);   // SSE live feed on/off
+  const sseRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -174,6 +177,19 @@ export default function ActivityLogPage() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // SSE live feed — prepends new events as they arrive
+  useEffect(() => {
+    if (!live) { sseRef.current?.close(); sseRef.current = null; return; }
+    const token = localStorage.getItem('token') || sessionStorage.getItem('token') || '';
+    sseRef.current = createSSE('/api/log/stream', event => {
+      setEntries(prev => {
+        if (prev.some(e => e.event_id === event.event_id)) return prev;
+        return [event, ...prev].slice(0, 200);
+      });
+    }, { token });
+    return () => { sseRef.current?.close(); sseRef.current = null; };
+  }, [live]);
 
   const clearLog = async () => {
     setClearing(true);
@@ -194,6 +210,18 @@ export default function ActivityLogPage() {
           <h1 className="text-xl font-bold text-white flex items-center gap-2">
             <ScrollText size={20} /> Activity Log
           </h1>
+          <button
+            onClick={() => setLive(l => !l)}
+            title={live ? 'Live feed on — click to pause' : 'Live feed paused — click to resume'}
+            className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+              live
+                ? 'bg-green-900/20 border-green-800/40 text-green-400'
+                : 'bg-panel-700 border-panel-600 text-gray-500'
+            }`}
+          >
+            <Radio size={11} className={live ? 'animate-pulse' : ''} />
+            {live ? 'Live' : 'Paused'}
+          </button>
           {errorCount > 0 && (
             <span className="text-xs px-2 py-0.5 rounded bg-red-900/30 text-red-400">
               {errorCount} error{errorCount !== 1 ? 's' : ''}
