@@ -24,6 +24,19 @@ class UserUpdate(BaseModel):
     password: Optional[str] = None
 
 
+class ProfileUpdate(BaseModel):
+    preferred_name: Optional[str] = None
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    company: Optional[str] = None
+    address_line1: Optional[str] = None
+    address_line2: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    postcode: Optional[str] = None
+    country: Optional[str] = None
+
+
 @router.get("/")
 async def list_users(db: AsyncSession = Depends(get_db), _=Depends(require_admin)):
     result = await db.execute(select(User).order_by(User.id))
@@ -102,6 +115,23 @@ async def update_user(user_id: int, body: UserUpdate, db: AsyncSession = Depends
         except Exception:
             pass
     return {"ok": True}
+
+
+@router.patch("/me")
+async def update_my_profile(
+    body: ProfileUpdate,
+    current: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update the currently logged-in user's personal/contact details."""
+    result = await db.execute(select(User).where(User.id == current.id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(404, "User not found")
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(user, field, value)
+    await db.commit()
+    return {"ok": True, "preferred_name": user.preferred_name or ""}
 
 
 @router.delete("/{user_id}", status_code=204)

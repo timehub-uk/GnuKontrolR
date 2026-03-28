@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings, Key, User, Lock, CheckCircle, ExternalLink } from 'lucide-react';
+import { Settings, Key, User, Lock, CheckCircle, ExternalLink, Contact } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
 
@@ -219,8 +219,121 @@ function OpenCodeRow({ connected, onRefresh }) {
   );
 }
 
+function PersonalDetailsCard({ user, onSaved }) {
+  const [form, setForm] = useState({
+    preferred_name: '',
+    full_name:      '',
+    phone:          '',
+    company:        '',
+    address_line1:  '',
+    address_line2:  '',
+    city:           '',
+    state:          '',
+    postcode:       '',
+    country:        '',
+  });
+  const [saving, setSaving] = useState(false);
+  const [msg,    setMsg]    = useState(null);
+
+  // Populate from user object when it loads
+  useEffect(() => {
+    if (!user) return;
+    setForm({
+      preferred_name: user.preferred_name || '',
+      full_name:      user.full_name      || '',
+      phone:          user.phone          || '',
+      company:        user.company        || '',
+      address_line1:  user.address_line1  || '',
+      address_line2:  user.address_line2  || '',
+      city:           user.city           || '',
+      state:          user.state          || '',
+      postcode:       user.postcode       || '',
+      country:        user.country        || '',
+    });
+  }, [user]);
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const save = async () => {
+    setSaving(true);
+    setMsg(null);
+    try {
+      await api.patch('/api/users/me', form);
+      setMsg({ type: 'ok', text: 'Details saved.' });
+      if (onSaved) onSaved();
+    } catch (err) {
+      setMsg({ type: 'err', text: err.response?.data?.detail || 'Save failed.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const field = (label, key, opts = {}) => (
+    <div className={opts.full ? 'col-span-2' : ''}>
+      <label className="block text-xs text-ink-muted mb-1">{label}</label>
+      <input
+        className="input w-full text-sm"
+        type={opts.type || 'text'}
+        placeholder={opts.placeholder || ''}
+        value={form[key]}
+        onChange={e => set(key, e.target.value)}
+      />
+    </div>
+  );
+
+  return (
+    <div className="card space-y-4">
+      <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+        <Contact size={14} /> Personal &amp; Contact Details
+      </h2>
+
+      {/* Preferred name — highlighted at top */}
+      <div className="bg-brand/8 border border-brand/20 rounded-xl p-4 space-y-1">
+        <label className="block text-xs font-medium text-brand-light">
+          What would you like to be called?
+        </label>
+        <input
+          className="input w-full text-sm"
+          type="text"
+          placeholder="e.g. Alex, Dr Smith, Captain…"
+          value={form.preferred_name}
+          onChange={e => set('preferred_name', e.target.value)}
+        />
+        <p className="text-[11px] text-ink-faint">
+          Used in panel greetings — leave blank to use your username.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        {field('Full Name', 'full_name', { placeholder: 'Jane Smith' })}
+        {field('Phone', 'phone', { placeholder: '+1 555 000 0000' })}
+        {field('Company', 'company', { placeholder: 'Acme Ltd', full: false })}
+        {field('Address Line 1', 'address_line1', { placeholder: '123 Main St', full: false })}
+        {field('Address Line 2', 'address_line2', { placeholder: 'Suite 4B', full: false })}
+        {field('City', 'city', { placeholder: 'London' })}
+        {field('State / Region', 'state', { placeholder: 'England' })}
+        {field('Postcode / ZIP', 'postcode', { placeholder: 'EC1A 1BB' })}
+        {field('Country', 'country', { placeholder: 'United Kingdom' })}
+      </div>
+
+      {msg && (
+        <p className={`text-xs ${msg.type === 'ok' ? 'text-ok' : 'text-bad-light'}`}>
+          {msg.text}
+        </p>
+      )}
+      <button
+        onClick={save}
+        disabled={saving}
+        className="btn-primary text-sm disabled:opacity-50"
+      >
+        {saving ? 'Saving…' : 'Save Details'}
+      </button>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const [tab, setTab] = useState('account');
   const [providers, setProviders] = useState([]);
 
@@ -240,8 +353,8 @@ export default function SettingsPage() {
   const isConfigured = id => providers.find(p => p.provider === id && p.configured === true);
 
   const tabs = [
-    { id: 'account', label: 'Account', icon: User },
-    { id: 'ai_keys', label: 'AI Keys', icon: Key },
+    { id: 'account', label: 'Account',  icon: User },
+    { id: 'ai_keys', label: 'AI Keys',  icon: Key  },
   ];
 
   return (
@@ -271,15 +384,23 @@ export default function SettingsPage() {
       {/* Account tab */}
       {tab === 'account' && (
         <>
+          {/* Read-only account info */}
           <div className="card space-y-4">
-            <h2 className="text-sm font-semibold text-white">Account</h2>
+            <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+              <User size={14} /> Account
+            </h2>
             <div className="grid grid-cols-2 gap-4 text-sm">
-              <div><span className="text-gray-400">Username</span><div className="text-white mt-1">{user?.username}</div></div>
+              <div><span className="text-gray-400">Username</span><div className="text-white mt-1 font-mono">{user?.username}</div></div>
               <div><span className="text-gray-400">Email</span><div className="text-white mt-1">{user?.email}</div></div>
               <div><span className="text-gray-400">Role</span><div className="text-white mt-1 capitalize">{user?.role}</div></div>
               <div><span className="text-gray-400">Disk Quota</span><div className="text-white mt-1">{user?.disk_quota_mb} MB</div></div>
             </div>
           </div>
+
+          {/* Personal & Contact Details */}
+          <PersonalDetailsCard user={user} onSaved={refreshUser} />
+
+          {/* Change Password */}
           <div className="card space-y-4">
             <h2 className="text-sm font-semibold text-white flex items-center gap-2"><Lock size={14} />Change Password</h2>
             <input className="input" type="password" placeholder="Current password" />

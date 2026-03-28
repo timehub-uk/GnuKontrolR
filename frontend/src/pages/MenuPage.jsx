@@ -537,7 +537,7 @@ export default function MenuPage() {
         </div>
         <div>
           <h1 className="text-lg font-bold text-white">
-            Welcome, {user?.username}
+            Welcome, {user?.preferred_name || user?.username}
           </h1>
           <p className="text-xs text-gray-500 capitalize">{user?.role} · GnuKontrolR Control Panel</p>
         </div>

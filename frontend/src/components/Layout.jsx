@@ -177,9 +177,10 @@ export default function Layout({ children }) {
     if (location.pathname === '/notifications') setUnreadCount(0);
   }, [location.pathname]);
 
-  const canGoBack  = historyDepth.current > 1;
-  const breadcrumb = ROUTE_LABELS[location.pathname] ?? 'GnuKontrolR';
-  const initial    = (user?.username?.[0] ?? '?').toUpperCase();
+  const canGoBack    = historyDepth.current > 1;
+  const breadcrumb   = ROUTE_LABELS[location.pathname] ?? 'GnuKontrolR';
+  const displayName  = user?.preferred_name || user?.username || '?';
+  const initial      = displayName[0].toUpperCase();
 
   const roleColors = {
     superadmin: 'bg-brand/15 text-brand-light border-brand/25',
@@ -250,11 +251,12 @@ export default function Layout({ children }) {
               <div
                 className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold text-white"
                 style={{ background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', boxShadow: '0 0 10px rgba(99,102,241,0.3)' }}
+                title={user?.username}
               >
                 {initial}
               </div>
               <div className="min-w-0">
-                <div className="text-[12px] font-semibold text-ink-primary truncate">{user?.username}</div>
+                <div className="text-[12px] font-semibold text-ink-primary truncate">{displayName}</div>
                 <div className="text-[10px] text-ink-muted flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-brand flex-shrink-0" />
                   {user?.role}

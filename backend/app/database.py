@@ -30,8 +30,9 @@ async def get_db():
 # List every column addition here as (table, column, sql_type, default).
 # Each entry is applied with ALTER TABLE … ADD COLUMN … if the column is absent.
 _COLUMN_MIGRATIONS: list[tuple[str, str, str, str]] = [
-    ("domains",  "acme_email",  "VARCHAR(128)", "NULL"),
-    ("domains",  "is_master",   "BOOLEAN",      "0"),
+    ("domains",  "acme_email",     "VARCHAR(128)", "NULL"),
+    ("domains",  "is_master",      "BOOLEAN",      "0"),
+    ("users",    "preferred_name", "VARCHAR(64)",  "''"),
 ]
 
 

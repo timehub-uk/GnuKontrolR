@@ -28,6 +28,7 @@ class User(Base):
     updated_at      = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Extended customer profile
+    preferred_name  = Column(String(64),  default="")   # what the user wants to be called
     company         = Column(String(128), default="")
     phone           = Column(String(32),  default="")
     address_line1   = Column(String(256), default="")
