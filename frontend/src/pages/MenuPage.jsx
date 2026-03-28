@@ -154,6 +154,24 @@ export const IconBrain = I(<>
   <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/>
 </>);
 
+export const IconBot = I(<>
+  <path d="M12 8V4H8"/>
+  <rect width="16" height="12" x="4" y="8" rx="2"/>
+  <path d="M2 14h2M20 14h2M9 14v2M15 14v2"/>
+  <circle cx="9" cy="13" r="1" fill="currentColor" stroke="none"/>
+  <circle cx="15" cy="13" r="1" fill="currentColor" stroke="none"/>
+</>);
+
+export const IconSparkles = I(<>
+  <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>
+  <path d="M20 3v4M22 5h-4"/>
+</>);
+
+export const IconWand = I(<>
+  <path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8 19 13M17.8 6.2 19 5M3 21l9-9M12.2 6.2 11 5"/>
+  <path d="m2 22 10-10"/>
+</>);
+
 // ── Menu definition (with description + details for info cards) ───────────────
 
 const MENU = [
@@ -205,18 +223,6 @@ const MENU = [
         to: '/networking', icon: IconNetwork, label: 'Networking',
         description: 'IP blocking, firewall, country geo-blocking.',
         details: 'Manage IP ban lists, per-domain country blocking with flag-based country selector, firewall rules, and the full API endpoint reference. Master IPs (Docker bridge + server external) are always whitelisted.',
-        adminOnly: true,
-      },
-      {
-        to: '/ai-admin', icon: IconBrain, label: 'AI Admin',
-        description: 'Configure AI providers and LLM settings.',
-        details: 'Set up and manage AI provider API keys (Anthropic, OpenAI, Ollama, OpenCode). Configure default models, enable or disable the AI assistant panel-wide, and review AI usage per user.',
-        adminOnly: true,
-      },
-      {
-        to: '/ai-containers', icon: IconCpu, label: 'AI Containers',
-        description: 'Manage dedicated per-user AI containers.',
-        details: 'View, stop, and remove the isolated Docker containers provisioned per user for AI tool sessions. Containers are named ai-{tool}-{user}-{id} and created automatically on first AI session.',
         adminOnly: true,
       },
       {
@@ -277,6 +283,38 @@ const MENU = [
         to: '/admin-content', icon: IconEye, label: 'Content Viewer',
         description: 'Review hosted content across domains.',
         details: 'Admin tool to inspect the content served by any hosted domain — HTML source, headers, and file listings. Used for abuse investigation and compliance review.',
+        adminOnly: true,
+      },
+    ],
+  },
+  {
+    category: 'AI',
+    color: 'from-cyan-600/20 to-teal-800/10 border-cyan-700/40',
+    accent: 'text-cyan-400',
+    icon: IconBrain,
+    adminOnly: true,
+    items: [
+      {
+        to: '/ai-admin', icon: IconBrain, label: 'AI Admin',
+        description: 'Configure AI providers and LLM settings.',
+        details: 'Set up and manage AI provider API keys (Anthropic, OpenAI, Ollama, OpenCode). Configure default models, enable or disable the AI assistant panel-wide, and review AI usage per user.',
+        adminOnly: true,
+      },
+      {
+        to: '/ai-containers', icon: IconBot, label: 'AI Containers',
+        description: 'Manage dedicated per-user AI containers.',
+        details: 'View, stop, and remove the isolated Docker containers provisioned per user for AI tool sessions. Containers are named ai-{tool}-{user}-{id} and created automatically on first AI session.',
+        adminOnly: true,
+      },
+      {
+        to: '/security', icon: IconSparkles, label: 'AI Security',
+        description: 'AI-powered security scanning and analysis.',
+        details: 'Use the AI assistant to help analyse security scan results, interpret CVE threats, review malware alerts, and get intelligent recommendations for hardening your domains.',
+      },
+      {
+        to: '/diagnostic', icon: IconWand, label: 'AI Diagnostic',
+        description: 'AI-assisted server diagnostics.',
+        details: 'Run the AI assistant alongside the diagnostic tools to get natural-language explanations of server health checks, error log analysis, and performance bottleneck suggestions.',
         adminOnly: true,
       },
     ],
