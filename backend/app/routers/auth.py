@@ -8,6 +8,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional
 
 from app.database import get_db
+from app.notify import push as notify_push
 from app.models.user import User, Role
 from app.auth import (
     verify_password, hash_password,
@@ -162,6 +163,20 @@ async def register(req: RegisterRequest, request: Request, db: AsyncSession = De
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    if not is_first:
+        import asyncio as _asyncio
+        _asyncio.create_task(notify_push(
+            db,
+            type    = "user_registered",
+            title   = f"New user registered: {user.username}",
+            message = f"'{user.username}' ({user.email}) registered a new account.",
+            details = {
+                "Username": user.username,
+                "Email":    user.email,
+                "Role":     user.role,
+                "Name":     user.full_name or "—",
+            },
+        ))
     return {"id": user.id, "username": user.username, "role": user.role}
 
 

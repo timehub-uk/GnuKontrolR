@@ -40,7 +40,7 @@ if _DEBUG_LEVEL >= 5:
 # ─────────────────────────────────────────────────────────────────────────────
 
 from app.database import init_db
-from app.routers import auth, users, domains, server, docker_mgr, services, admin_content, container_proxy, security, activity_log, marketplace, ai, ai_admin, terminal, system_logs, dns, dns_sync, localdns
+from app.routers import auth, users, domains, server, docker_mgr, services, admin_content, container_proxy, security, activity_log, marketplace, ai, ai_admin, terminal, system_logs, dns, dns_sync, localdns, notifications
 
 
 # Prometheus metrics
@@ -231,6 +231,7 @@ app.include_router(system_logs.router)
 app.include_router(dns.router)
 app.include_router(dns_sync.router)
 app.include_router(localdns.router)
+app.include_router(notifications.router)
 
 
 @app.get("/api/metrics", include_in_schema=False)

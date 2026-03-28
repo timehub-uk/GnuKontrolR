@@ -28,6 +28,7 @@ import SecurityPage      from './pages/SecurityPage';
 import MenuPage          from './pages/MenuPage';
 import AiAdminPage       from './pages/AiAdminPage';
 import DiagnosticPage    from './pages/DiagnosticPage';
+import NotificationsPage from './pages/NotificationsPage';
 
 const pageTransition = {
   initial:    { opacity: 0, y: 8 },
@@ -68,8 +69,9 @@ function AnimatedRoutes() {
         <Route path="/settings"      element={<Pg><SettingsPage /></Pg>} />
         <Route path="/activity-log"  element={<Pg><ActivityLogPage /></Pg>} />
         <Route path="/menu"          element={<Pg><MenuPage /></Pg>} />
-        <Route path="/ai-admin"      element={<Pg><AiAdminPage /></Pg>} />
-        <Route path="/diagnostic"    element={<Pg><DiagnosticPage /></Pg>} />
+        <Route path="/ai-admin"       element={<Pg><AiAdminPage /></Pg>} />
+        <Route path="/diagnostic"     element={<Pg><DiagnosticPage /></Pg>} />
+        <Route path="/notifications"  element={<Pg><NotificationsPage /></Pg>} />
       </Routes>
     </AnimatePresence>
   );

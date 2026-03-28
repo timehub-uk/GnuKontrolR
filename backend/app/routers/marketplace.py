@@ -35,6 +35,7 @@ from app.routers.container_proxy import _container_api_url, _TLS_VERIFY
 from app.dns_helper import register_vdns
 import httpx
 from app.http_client import panel_client
+from app.notify import push as notify_push
 
 router = APIRouter(prefix="/api/marketplace", tags=["marketplace"])
 
@@ -485,6 +486,20 @@ async def start_install(req: InstallRequest, user=Depends(get_current_user), db:
                 )
                 db.add(record)
                 await db.commit()
+                import asyncio as _asyncio
+                _asyncio.create_task(notify_push(
+                    db,
+                    type    = "app_installed",
+                    title   = f"App installed: {app.get('name', req.app_id)} on {req.domain}",
+                    message = f"'{app.get('name', req.app_id)}' was installed on {req.domain} by {user.username}.",
+                    details = {
+                        "App":     app.get("name", req.app_id),
+                        "Domain":  req.domain,
+                        "Path":    req.install_path or "/",
+                        "URL":     vdns_url,
+                        "By":      user.username,
+                    },
+                ))
             except Exception:
                 await db.rollback()
 

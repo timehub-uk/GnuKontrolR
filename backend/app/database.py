@@ -30,7 +30,8 @@ async def get_db():
 # List every column addition here as (table, column, sql_type, default).
 # Each entry is applied with ALTER TABLE … ADD COLUMN … if the column is absent.
 _COLUMN_MIGRATIONS: list[tuple[str, str, str, str]] = [
-    ("domains",        "acme_email",   "VARCHAR(128)", "NULL"),
+    ("domains",  "acme_email",  "VARCHAR(128)", "NULL"),
+    ("domains",  "is_master",   "BOOLEAN",      "0"),
 ]
 
 
@@ -45,7 +46,7 @@ async def _run_column_migrations(conn) -> None:
 
 
 async def init_db():
-    from app.models import user, domain, container_port, request_log, ai_provider, app_cache, installed_app  # noqa — registers models
+    from app.models import user, domain, container_port, request_log, ai_provider, app_cache, installed_app, notification  # noqa — registers models
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _run_column_migrations(conn)

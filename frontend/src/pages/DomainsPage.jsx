@@ -4,7 +4,8 @@ import { toast } from 'sonner';
 import api from '../utils/api';
 import { fmtDate } from '../utils/dates';
 import DataTable from '../components/DataTable';
-import { Globe, Plus, Trash2, RefreshCw, RefreshCcw, RotateCcw } from 'lucide-react';
+import { Globe, Plus, Trash2, RefreshCw, RefreshCcw, RotateCcw, Crown } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 // ── Status badge ──────────────────────────────────────────────────────────────
 const STATUS_BADGE = {
@@ -119,6 +120,8 @@ const col = createColumnHelper();
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 export default function DomainsPage() {
+  const { user }                        = useAuth();
+  const isSuperAdmin                    = user?.role === 'superadmin';
   const [domains,      setDomains]      = useState([]);
   const [loading,      setLoading]      = useState(true);
   const [form,         setForm]         = useState({ name: '', php_version: '8.2', domain_type: 'main' });
@@ -128,6 +131,7 @@ export default function DomainsPage() {
   const [syncing,      setSyncing]      = useState(null);
   const [resetTarget,  setResetTarget]  = useState(null);   // domain object
   const [resetting,    setResetting]    = useState(false);
+  const [settingMaster, setSettingMaster] = useState(null); // domain id
 
   const load = async () => {
     setLoading(true);
@@ -182,6 +186,19 @@ export default function DomainsPage() {
     }
   };
 
+  const setMasterDomain = async id => {
+    setSettingMaster(id);
+    try {
+      const { data } = await api.post(`/api/domains/${id}/set-master`);
+      toast.success(`Master domain set to ${data.panel_domain}`);
+      await load();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Failed to set master domain');
+    } finally {
+      setSettingMaster(null);
+    }
+  };
+
   const confirmResetDns = async id => {
     setResetting(true);
     try {
@@ -200,7 +217,14 @@ export default function DomainsPage() {
     col.accessor('name', {
       header: 'Domain',
       cell: i => (
-        <span className="font-medium text-ink-primary">{i.getValue()}</span>
+        <div className="flex items-center gap-2">
+          <span className="font-medium text-ink-primary">{i.getValue()}</span>
+          {i.row.original.is_master && (
+            <span className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/25">
+              <Crown size={9} /> master
+            </span>
+          )}
+        </div>
       ),
     }),
     col.accessor('domain_type', {
@@ -239,6 +263,20 @@ export default function DomainsPage() {
       header: '',
       cell: ({ row }) => (
         <div className="flex items-center gap-1">
+          {isSuperAdmin && (
+            <button
+              onClick={() => setMasterDomain(row.original.id)}
+              disabled={settingMaster === row.original.id || row.original.is_master}
+              className={`p-1 rounded transition-colors
+                ${row.original.is_master
+                  ? 'text-amber-400 cursor-default'
+                  : 'text-ink-muted hover:text-amber-400'}
+                ${settingMaster === row.original.id ? 'animate-pulse' : ''}`}
+              title={row.original.is_master ? 'Current master domain' : 'Set as master domain'}
+            >
+              <Crown size={13} />
+            </button>
+          )}
           <button
             onClick={() => syncDns(row.original.name)}
             disabled={syncing === row.original.name}
@@ -264,7 +302,7 @@ export default function DomainsPage() {
         </div>
       ),
     }),
-  ], [syncing]);
+  ], [syncing, settingMaster, isSuperAdmin]);
 
   return (
     <div className="space-y-5">

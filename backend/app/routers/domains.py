@@ -16,6 +16,7 @@ from app.models.container_port import ContainerPort
 from app.models.user import User, Role
 from app.auth import get_current_user
 from app.routers.localdns import _localdns_sync
+from app.notify import push as notify_push
 
 log = logging.getLogger("webpanel")
 
@@ -99,7 +100,9 @@ async def list_domains(db: AsyncSession = Depends(get_db), current: User = Depen
             "domain_type": d.domain_type, "status": d.status,
             "ssl_enabled": d.ssl_enabled, "ssl_expires": d.ssl_expires,
             "php_version": d.php_version, "doc_root": d.doc_root,
-            "redirect_to": d.redirect_to, "acme_email": d.acme_email, "created_at": d.created_at,
+            "redirect_to": d.redirect_to, "acme_email": d.acme_email,
+            "is_master": getattr(d, 'is_master', False) or False,
+            "created_at": d.created_at,
             "services": _domain_services(d, ssh_ports, running_names),
         }
         for d in domains
@@ -136,6 +139,20 @@ async def create_domain(body: DomainCreate, db: AsyncSession = Depends(get_db), 
 
     # Auto-create the site container in the background (non-blocking)
     asyncio.create_task(_create_container_for_domain(domain.name, domain.php_version or "8.2", db, owner_email=current.email))
+
+    asyncio.create_task(notify_push(
+        db,
+        type    = "domain_created",
+        title   = f"New domain: {domain.name}",
+        message = f"Domain '{domain.name}' was created by {current.username}.",
+        details = {
+            "Domain":   domain.name,
+            "Type":     body.domain_type,
+            "PHP":      domain.php_version or "8.2",
+            "Owner":    current.username,
+            "Owner email": current.email,
+        },
+    ))
 
     return {"id": domain.id, "name": domain.name, "status": domain.status}
 
@@ -610,6 +627,79 @@ async def reset_domain_dns(
     await deprovision_domain_dns(domain.name)
     await provision_domain_dns(domain)
     return {"ok": True, "domain": domain.name}
+
+
+@router.post("/{domain_id}/set-master", status_code=200)
+async def set_master_domain(
+    domain_id: int,
+    db:      AsyncSession = Depends(get_db),
+    current: User         = Depends(get_current_user),
+):
+    """Designate this domain as the panel master domain (PANEL_DOMAIN).
+
+    - Clears is_master on all other domains.
+    - Sets is_master=True on this domain.
+    - Writes PANEL_DOMAIN to .env.
+    - Re-provisions DNS for the master zone: NS records, mail A record (MX 15),
+      SPF/DKIM/DMARC/MTA-STS/TLS-RPT TXT records, CAA.
+    - Calls sync_panel_ns_zone so all hosted zones get the new NS addresses.
+    """
+    if current.role not in (Role.superadmin, Role.admin):
+        raise HTTPException(403, "Superadmin or admin required")
+    result = await db.execute(select(Domain).where(Domain.id == domain_id))
+    domain = result.scalar_one_or_none()
+    if not domain:
+        raise HTTPException(404, "Domain not found")
+
+    # Clear previous master, set new one
+    all_result = await db.execute(select(Domain))
+    for d in all_result.scalars().all():
+        if d.id == domain_id:
+            d.is_master = True
+        elif getattr(d, 'is_master', False):
+            d.is_master = False
+    await db.commit()
+
+    # Update .env PANEL_DOMAIN
+    _update_env_var("PANEL_DOMAIN", domain.name)
+
+    # Re-provision the master zone with full NS + mail + email security records
+    await deprovision_domain_dns(domain.name)
+    await provision_domain_dns(domain)
+
+    # Sync all hosted zones so they point NS at ns1-3.{new master}
+    asyncio.create_task(_sync_all_ns_for_master(domain.name))
+
+    return {"ok": True, "panel_domain": domain.name}
+
+
+def _update_env_var(key: str, value: str) -> None:
+    """Write or update a key=value pair in .env (non-blocking, best-effort)."""
+    import re as _re
+    env_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")
+    env_path = os.path.normpath(env_path)
+    try:
+        content = open(env_path).read() if os.path.exists(env_path) else ""
+        if f"{key}=" in content:
+            content = _re.sub(rf"^{key}=.*$", f"{key}={value}", content, flags=_re.MULTILINE)
+        else:
+            content += f"\n{key}={value}\n"
+        with open(env_path, "w") as f:
+            f.write(content)
+        log.info("Updated .env: %s=%s", key, value)
+    except Exception as exc:
+        log.warning("Could not update .env %s: %s", key, exc)
+
+
+async def _sync_all_ns_for_master(panel_domain: str) -> None:
+    """Background: sync NS records on all zones after master domain change."""
+    try:
+        from app.dns_helper import sync_panel_ns_zone, get_external_ip
+        ip = await get_external_ip()
+        if ip:
+            await sync_panel_ns_zone(ip)
+    except Exception as exc:
+        log.warning("NS sync after master change failed: %s", exc)
 
 
 @router.delete("/{domain_id}", status_code=204)

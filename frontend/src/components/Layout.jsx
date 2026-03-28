@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import {
@@ -6,10 +6,11 @@ import {
   FolderOpen, Database, Mail, ShieldCheck, ScrollText,
   HardDrive, Terminal, Settings, LogOut,
   Package, Eye, Activity, Shield, ChevronRight, ChevronLeft, Cpu,
-  LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit, Stethoscope,
+  LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit, Stethoscope, Bell,
 } from 'lucide-react';
 import AiPanel from './AiPanel';
 import CommandPalette from './CommandPalette';
+import api from '../utils/api';
 
 // ── Brand logo SVG ────────────────────────────────────────────────────────────
 function BrandIcon({ size = 26 }) {
@@ -74,8 +75,9 @@ const NAV_GROUPS = [
   {
     label: 'Admin',
     items: [
-      { to: '/users',    icon: Users,    label: 'Users',    adminOnly: true },
-      { to: '/settings', icon: Settings, label: 'Settings' },
+      { to: '/notifications', icon: Bell,     label: 'Notifications', adminOnly: true },
+      { to: '/users',         icon: Users,    label: 'Users',         adminOnly: true },
+      { to: '/settings',      icon: Settings, label: 'Settings'       },
     ],
   },
 ];
@@ -87,11 +89,11 @@ const ROUTE_LABELS = {
   '/ssl': 'SSL / TLS', '/backups': 'Backups', '/logs': 'Logs', '/terminal': 'Terminal',
   '/security': 'Security', '/activity-log': 'Activity Log', '/admin-content': 'Content Viewer',
   '/users': 'Users', '/settings': 'Settings', '/ai-admin': 'AI Admin',
-  '/diagnostic': 'Diagnostic',
+  '/diagnostic': 'Diagnostic', '/notifications': 'Notifications',
 };
 
 // ── NavItem — full or icon-only ───────────────────────────────────────────────
-function NavItem({ to, icon: Icon, label, end, collapsed }) {
+function NavItem({ to, icon: Icon, label, end, collapsed, badge }) {
   return (
     <div className="relative group/tip">
       <NavLink
@@ -109,8 +111,18 @@ function NavItem({ to, icon: Icon, label, end, collapsed }) {
       >
         {({ isActive }) => (
           <>
-            <Icon size={15} className={`flex-shrink-0 ${isActive ? 'text-brand' : ''}`} />
-            {!collapsed && <span className="truncate">{label}</span>}
+            <div className="relative flex-shrink-0">
+              <Icon size={15} className={isActive ? 'text-brand' : ''} />
+              {badge > 0 && (
+                <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-ok shadow-[0_0_6px_rgba(74,222,128,0.8)] animate-pulse" />
+              )}
+            </div>
+            {!collapsed && <span className="truncate flex-1">{label}</span>}
+            {!collapsed && badge > 0 && (
+              <span className="text-[10px] font-bold bg-ok/20 text-ok px-1.5 py-0.5 rounded-full leading-none">
+                {badge > 99 ? '99+' : badge}
+              </span>
+            )}
           </>
         )}
       </NavLink>
@@ -122,7 +134,7 @@ function NavItem({ to, icon: Icon, label, end, collapsed }) {
           rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-xl
           opacity-0 group-hover/tip:opacity-100 transition-opacity duration-150
         ">
-          {label}
+          {label}{badge > 0 ? ` (${badge})` : ''}
           <div className="absolute right-full top-1/2 -translate-y-1/2 border-4 border-transparent border-r-panel-subtle" />
         </div>
       )}
@@ -135,7 +147,8 @@ export default function Layout({ children }) {
   const { user, logout } = useAuth();
   const navigate   = useNavigate();
   const location   = useLocation();
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed]       = useState(false);
+  const [unreadCount, setUnreadCount]   = useState(0);
   const historyDepth = useRef(0);
 
   // Track navigation depth so we know when there's somewhere to go back to
@@ -143,9 +156,28 @@ export default function Layout({ children }) {
     historyDepth.current += 1;
   }, [location.pathname]);
 
-  const canGoBack = historyDepth.current > 1;
+  // Poll unread notification count every 30 s (admin only)
+  const isAdmin = ['superadmin', 'admin'].includes(user?.role);
+  const fetchUnread = useCallback(async () => {
+    if (!isAdmin) return;
+    try {
+      const { data } = await api.get('/api/notifications/unread-count');
+      setUnreadCount(data.count ?? 0);
+    } catch { /* non-fatal */ }
+  }, [isAdmin]);
 
-  const isAdmin    = ['superadmin', 'admin'].includes(user?.role);
+  useEffect(() => {
+    fetchUnread();
+    const timer = setInterval(fetchUnread, 30_000);
+    return () => clearInterval(timer);
+  }, [fetchUnread]);
+
+  // Reset unread count when navigating to notifications page
+  useEffect(() => {
+    if (location.pathname === '/notifications') setUnreadCount(0);
+  }, [location.pathname]);
+
+  const canGoBack  = historyDepth.current > 1;
   const breadcrumb = ROUTE_LABELS[location.pathname] ?? 'GnuKontrolR';
   const initial    = (user?.username?.[0] ?? '?').toUpperCase();
 
@@ -203,6 +235,7 @@ export default function Layout({ children }) {
                     label={item.label}
                     end={item.end}
                     collapsed={collapsed}
+                    badge={item.to === '/notifications' ? unreadCount : 0}
                   />
                 ))}
               </div>

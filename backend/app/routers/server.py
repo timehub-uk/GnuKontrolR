@@ -57,6 +57,19 @@ def _collect_stats() -> dict:
     mem  = psutil.virtual_memory()
     disk = psutil.disk_usage("/")
     net  = psutil.net_io_counters()
+
+    # Internal IPs — all non-loopback addresses
+    internal_ips: list[str] = []
+    for iface, addrs in psutil.net_if_addrs().items():
+        if iface.startswith("lo"):
+            continue
+        for a in addrs:
+            if a.family == socket.AF_INET and not a.address.startswith("127."):
+                internal_ips.append(a.address)
+
+    # External IP from env (set by dns_helper auto-detection startup or .env)
+    external_ip = os.getenv("SERVER_IP", "")
+
     return {
         "cpu_percent":    cpu,
         "mem_total_mb":   mem.total  // (1024 * 1024),
@@ -68,6 +81,8 @@ def _collect_stats() -> dict:
         "net_sent_mb":    net.bytes_sent // (1024 * 1024),
         "net_recv_mb":    net.bytes_recv // (1024 * 1024),
         "boot_timestamp": int(psutil.boot_time()),
+        "internal_ips":   internal_ips,
+        "external_ip":    external_ip,
     }
 
 

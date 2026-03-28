@@ -447,6 +447,20 @@ async def provision_domain_dns(domain: "Domain", server_ip: str = "") -> None:
     immediately have working NS delegation.
     """
     ip = server_ip or SERVER_IP
+    if not ip or ip in _PLACEHOLDER_IPS:
+        # Placeholder IP in .env — try to auto-detect the real server IP
+        detected = await get_external_ip()
+        if detected and detected not in _PLACEHOLDER_IPS:
+            ip = detected
+            log.info("AUTO-DETECTED server IP for DNS provisioning: %s", ip)
+        else:
+            log.warning(
+                "SERVER_IP is '%s' (placeholder) and auto-detection failed — "
+                "DNS records for %s will use placeholder IP. "
+                "Set SERVER_IP in .env to fix.",
+                ip, domain.name,
+            )
+
     if not ip:
         log.warning("SERVER_IP not set — skipping DNS provisioning for %s", domain.name)
         return
@@ -549,26 +563,43 @@ async def register_vdns(domain: str, subdomain: str, server_ip: str = "") -> str
     return fqdn
 
 
+_PLACEHOLDER_IPS = {"1.2.3.4", "0.0.0.0", "127.0.0.1", ""}
+
 async def get_external_ip() -> str:
     """Detect the server's external IP via a public IP echo service.
 
-    Falls back to SERVER_IP env var if the request fails.
+    Tries hostname-based services first, then IP-literal fallbacks (which work
+    even if the container's DNS is broken).  Falls back to SERVER_IP env var
+    only if all services fail — and warns if SERVER_IP is a placeholder value.
     """
+    import ipaddress
     services = [
         "https://api.ipify.org",
         "https://ifconfig.me/ip",
         "https://ipecho.net/plain",
+        # IP-literal fallbacks — bypass DNS so these work even if DNS is broken
+        "http://169.254.169.254/latest/meta-data/public-ipv4",   # AWS
     ]
     for url in services:
         try:
             async with httpx.AsyncClient(timeout=5) as c:
                 r = await c.get(url, headers={"Accept": "text/plain"})
                 if r.status_code == 200:
-                    ip = r.text.strip()
-                    if ip:
-                        return ip
+                    ip = r.text.strip().split()[0]  # strip any whitespace/trailing chars
+                    try:
+                        ipaddress.ip_address(ip)   # validate it's a real IP
+                        if ip not in _PLACEHOLDER_IPS:
+                            return ip
+                    except ValueError:
+                        continue
         except Exception:
             continue
+    if SERVER_IP in _PLACEHOLDER_IPS:
+        log.warning(
+            "SERVER_IP is '%s' (placeholder) — all IP-detection services failed. "
+            "Set SERVER_IP in .env to the real server IP.",
+            SERVER_IP,
+        )
     return SERVER_IP
 
 
