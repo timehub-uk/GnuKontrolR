@@ -58,17 +58,34 @@ def _collect_stats() -> dict:
     disk = psutil.disk_usage("/")
     net  = psutil.net_io_counters()
 
-    # Internal IPs — all non-loopback addresses
-    internal_ips: list[str] = []
-    for iface, addrs in psutil.net_if_addrs().items():
-        if iface.startswith("lo"):
-            continue
-        for a in addrs:
-            if a.family == socket.AF_INET and not a.address.startswith("127."):
-                internal_ips.append(a.address)
-
     # External IP from env (set by dns_helper auto-detection startup or .env)
     external_ip = os.getenv("SERVER_IP", "")
+
+    # Internal/LAN IPs — exclude loopback and Docker bridge ranges (172.16.0.0/12).
+    # psutil runs inside the panel container, so it sees Docker bridge IPs, not the
+    # host's real LAN interfaces. Filter these out; prefer LAN_IP env var if set.
+    import ipaddress as _ip
+    _DOCKER_RANGES = [
+        _ip.ip_network("172.16.0.0/12"),   # Docker bridge default range
+        _ip.ip_network("10.0.0.0/8"),      # often Docker overlay / k8s pod range
+    ]
+    internal_ips: list[str] = []
+    lan_ip_override = os.getenv("LAN_IP", "")
+    if lan_ip_override:
+        internal_ips = [lan_ip_override]
+    else:
+        for iface, addrs in psutil.net_if_addrs().items():
+            if iface.startswith("lo"):
+                continue
+            for a in addrs:
+                if a.family != socket.AF_INET or a.address.startswith("127."):
+                    continue
+                try:
+                    addr_obj = _ip.ip_address(a.address)
+                    if not any(addr_obj in rng for rng in _DOCKER_RANGES):
+                        internal_ips.append(a.address)
+                except ValueError:
+                    pass
 
     return {
         "cpu_percent":    cpu,
