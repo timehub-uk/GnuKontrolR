@@ -68,6 +68,7 @@ const NAV_GROUPS = [
     items: [
       { to: '/networking',     icon: Network,     label: 'Networking',     adminOnly: true },
       { to: '/ai-containers',  icon: Bot,         label: 'AI Containers',  adminOnly: true },
+      { to: '/ai-admin',       icon: BrainCircuit, label: 'AI Admin',      adminOnly: true },
     ],
   },
   {
@@ -75,8 +76,7 @@ const NAV_GROUPS = [
     items: [
       { to: '/security',      icon: Shield,   label: 'Security'      },
       { to: '/activity-log',  icon: Activity, label: 'Activity Log'  },
-      { to: '/admin-content', icon: Eye,          label: 'Content Viewer', adminOnly: true },
-      { to: '/ai-admin',      icon: BrainCircuit, label: 'AI Admin',       adminOnly: true },
+      { to: '/admin-content', icon: Eye,      label: 'Content Viewer', adminOnly: true },
     ],
   },
   {
