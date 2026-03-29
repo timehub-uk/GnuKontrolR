@@ -94,9 +94,38 @@ async def _sync_acme_email() -> None:
         logging.getLogger("webpanel").warning("ACME_EMAIL sync failed: %s", exc)
 
 
+async def _apply_saved_panel_config() -> None:
+    """Load panel_config.json from the data volume and apply to dns_helper module vars.
+
+    This ensures PANEL_DOMAIN / SERVER_IP overrides set via the settings UI survive
+    container restarts — Docker injects env vars from .env, but those may lag behind
+    the values the admin set in the panel.
+    """
+    import json as _json
+    import app.dns_helper as _dh
+    _cfg_path = "/app/data/panel_config.json"
+    try:
+        with open(_cfg_path) as f:
+            cfg = _json.load(f)
+        if cfg.get("panel_domain"):
+            _dh.PANEL_DOMAIN = cfg["panel_domain"]
+        if cfg.get("server_ip"):
+            _dh.SERVER_IP     = cfg["server_ip"]
+            _dh._effective_ip = cfg["server_ip"]
+        if cfg.get("acme_email"):
+            os.environ["ACME_EMAIL"] = cfg["acme_email"]
+        log.info("Panel config loaded from %s: domain=%s ip=%s",
+                 _cfg_path, cfg.get("panel_domain"), cfg.get("server_ip"))
+    except FileNotFoundError:
+        pass  # first run — no saved config yet
+    except Exception as exc:
+        log.warning("Could not load panel_config.json: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await _apply_saved_panel_config()
     await _sync_acme_email()
     # Start DNS sync background task (reconciles DB ↔ PowerDNS every 180 s)
     task     = asyncio.create_task(dns_sync.dns_sync_loop(interval=180))
