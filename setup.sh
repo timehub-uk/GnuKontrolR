@@ -321,7 +321,25 @@ UNIT
     echo ""
 
     # Auto-detect server IP
-    DETECTED_IP=$(ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' || hostname -I | awk '{print $1}')
+    # Detect external (public) IP — try multiple services, fall back to interface IP
+    DETECTED_IP=""
+    for _url in \
+        "https://api.ipify.org" \
+        "https://ifconfig.me/ip" \
+        "https://ipecho.net/plain" \
+        "https://checkip.amazonaws.com"; do
+      _ip=$(curl -fsSL --max-time 4 "$_url" 2>/dev/null | tr -d '[:space:]')
+      # Validate it looks like an IPv4 address
+      if [[ "$_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        DETECTED_IP="$_ip"
+        break
+      fi
+    done
+    # Final fallback: primary interface IP
+    if [[ -z "$DETECTED_IP" ]]; then
+      DETECTED_IP=$(ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' \
+                    || hostname -I 2>/dev/null | awk '{print $1}')
+    fi
 
     echo -e "${DIM}  ─────────────────────────────────────────────────────────${NC}"
     read -rp "  Panel domain  (e.g. panel.example.com) : " PANEL_DOMAIN_VAL
