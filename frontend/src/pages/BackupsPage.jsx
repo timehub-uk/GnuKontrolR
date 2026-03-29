@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { HardDrive, History, Plus, Trash2, Download, RefreshCw, AlertTriangle, Globe, Database, FolderOpen, PackageOpen } from 'lucide-react';
+import { HardDrive, History, Plus, Trash2, Download, RefreshCw, AlertTriangle, Globe, Database, FolderOpen, PackageOpen, ArchiveRestore, Upload } from 'lucide-react';
 import api from '../utils/api';
 import ConfigBackupsPanel from '../components/ConfigBackupsPanel';
 import BackupProgressCard from '../components/BackupProgressCard';
+import RecoveryCard from '../components/RecoveryCard';
+import UploadRecoveryCard from '../components/UploadRecoveryCard';
 
 const BACKUP_TYPES = [
   { id: 'website', label: 'Full Website',   icon: Globe,        desc: 'Web files + database dump' },
@@ -31,9 +33,11 @@ export default function BackupsPage() {
   // Full-site backup state
   const [backups,       setBackups]       = useState([]);
   const [loadingList,   setLoadingList]   = useState(false);
-  const [deleteConfirm, setDeleteConfirm] = useState(null);
-  const [error,         setError]         = useState('');
-  const [activeJob,     setActiveJob]     = useState(null);
+  const [deleteConfirm,  setDeleteConfirm]  = useState(null);
+  const [error,          setError]          = useState('');
+  const [activeJob,      setActiveJob]      = useState(null);
+  const [recoveryFile,   setRecoveryFile]   = useState(null);   // filename string → opens RecoveryCard
+  const [showUpload,     setShowUpload]     = useState(false);  // → opens UploadRecoveryCard
 
   useEffect(() => {
     api.get('/api/domains').then(r => {
@@ -78,13 +82,23 @@ export default function BackupsPage() {
     }
   };
 
-  const handleDownload = (filename) => {
+  const handleDownload = async (filename) => {
     const token = localStorage.getItem('access_token') || '';
-    const a = document.createElement('a');
-    a.href = `/api/container/${selectedDomain}/site-backup/download/${filename}`;
-    a.download = filename;
-    // Open in new tab so the auth header works via cookie/session
-    window.open(a.href + `?token=${token}`, '_blank');
+    try {
+      const resp = await fetch(`/api/container/${selectedDomain}/site-backup/download/${filename}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) { setError('Download failed: not authenticated'); return; }
+      const blob = await resp.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError('Download failed');
+    }
   };
 
   const handleJobClose = () => {
@@ -100,6 +114,19 @@ export default function BackupsPage() {
           jobId={activeJob.jobId}
           backupType={activeJob.backupType}
           onClose={handleJobClose}
+        />
+      )}
+      {recoveryFile && (
+        <RecoveryCard
+          domain={selectedDomain}
+          filename={recoveryFile}
+          onClose={() => { setRecoveryFile(null); loadBackups(); }}
+        />
+      )}
+      {showUpload && (
+        <UploadRecoveryCard
+          domain={selectedDomain}
+          onClose={() => { setShowUpload(false); loadBackups(); }}
         />
       )}
       <div>
@@ -177,6 +204,13 @@ export default function BackupsPage() {
               >
                 <RefreshCw size={13} className={loadingList ? 'animate-spin' : ''} />
                 Refresh
+              </button>
+              <button
+                onClick={() => setShowUpload(true)}
+                disabled={!selectedDomain}
+                className="btn-ghost flex items-center gap-1.5 py-1.5 px-3 text-xs border border-panel-border"
+              >
+                <Upload size={13} /> Upload Recovery
               </button>
               <button
                 onClick={handleCreate}
@@ -278,6 +312,13 @@ export default function BackupsPage() {
                           title="Download backup"
                         >
                           <Download size={12} /> Download
+                        </button>
+                        <button
+                          onClick={() => setRecoveryFile(b.filename)}
+                          className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium text-ok-light bg-ok/10 hover:bg-ok/20 transition-colors"
+                          title="Restore this backup"
+                        >
+                          <ArchiveRestore size={12} /> Recover
                         </button>
                         <button
                           onClick={() => setDeleteConfirm(b.filename)}
