@@ -55,12 +55,43 @@ log = logging.getLogger(__name__)
 
 PDNS_BASE    = os.getenv("PDNS_API_URL", "http://webpanel_powerdns:8081/api/v1/servers/localhost")
 PDNS_KEY     = os.getenv("PDNS_API_KEY", "")
-SERVER_IP    = os.getenv("SERVER_IP", "")
+SERVER_IP    = os.getenv("SERVER_IP", "")   # static boot value — use _effective_ip at runtime
 PANEL_DOMAIN = os.getenv("PANEL_DOMAIN", "")
 DKIM_KEYS_DIR = Path(os.getenv("DKIM_KEYS_DIR", "/etc/opendkim/keys"))
 DKIM_SELECTOR = "mail"   # standard selector name; matches DNS record mail._domainkey.{domain}
 
 _HEADERS = {"X-API-Key": PDNS_KEY, "Content-Type": "application/json"}
+
+# ── Runtime IP state ─────────────────────────────────────────────────────────
+# Updated every hour by ip_check_loop in dns_sync.py.  Starts with the boot
+# value so the first DNS sync works even before the first IP check completes.
+_effective_ip: str = SERVER_IP
+_effective_internal_ip: str = ""
+
+
+def update_effective_ip(external: str, internal: str = "") -> None:
+    """Called by the IP check loop when a new IP is detected."""
+    global _effective_ip, _effective_internal_ip
+    _effective_ip = external or SERVER_IP
+    if internal:
+        _effective_internal_ip = internal
+
+
+def get_effective_ip() -> str:
+    """Return the most recently detected external IP (falls back to SERVER_IP)."""
+    return _effective_ip or SERVER_IP
+
+
+async def get_internal_ip() -> str:
+    """Return the primary internal (interface) IP of this host."""
+    import socket
+    try:
+        # Connect to an external address to identify the outbound interface — no packet is sent.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return ""
 
 
 # ── DKIM key management ───────────────────────────────────────────────────────
@@ -208,6 +239,16 @@ def _a(name: str, ip: str, ttl: int = 300) -> dict:
         "ttl": ttl,
         "changetype": "REPLACE",
         "records": [{"content": ip, "disabled": False}],
+    }
+
+
+def _aaaa(name: str, ipv6: str, ttl: int = 300) -> dict:
+    return {
+        "name": _z(name),
+        "type": "AAAA",
+        "ttl": ttl,
+        "changetype": "REPLACE",
+        "records": [{"content": ipv6, "disabled": False}],
     }
 
 
@@ -563,138 +604,166 @@ async def register_vdns(domain: str, subdomain: str, server_ip: str = "") -> str
     return fqdn
 
 
-_PLACEHOLDER_IPS = {"1.2.3.4", "0.0.0.0", "127.0.0.1", ""}
+_PLACEHOLDER_IPS    = {"1.2.3.4", "0.0.0.0", "127.0.0.1", ""}
+_PLACEHOLDER_IPV6   = {"::1", ""}
+_IPV4_SERVICES = [
+    "https://api4.ipify.org",
+    "https://api.ipify.org",
+    "https://ifconfig.me/ip",
+    "https://ipecho.net/plain",
+    "https://checkip.amazonaws.com",
+    # IP-literal fallback — bypasses DNS (works if DNS is broken)
+    "http://169.254.169.254/latest/meta-data/public-ipv4",   # AWS EC2
+]
+_IPV6_SERVICES = [
+    "https://api6.ipify.org",
+    "https://ifconfig.co/ip",
+    "https://ip6.seeip.org",
+]
+
+
+async def _fetch_ip(url: str, family: int = 4) -> str:
+    """Fetch a raw IP string from *url*, validated as the given address *family* (4 or 6)."""
+    import ipaddress
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(url, headers={"Accept": "text/plain"})
+            if r.status_code != 200:
+                return ""
+            raw = r.text.strip().split()[0]
+            addr = ipaddress.ip_address(raw)
+            if addr.version == family:
+                return str(addr)
+    except Exception:
+        pass
+    return ""
+
 
 async def get_external_ip() -> str:
-    """Detect the server's external IP via a public IP echo service.
+    """Detect the server's external IPv4 via a public IP echo service.
 
-    Tries hostname-based services first, then IP-literal fallbacks (which work
-    even if the container's DNS is broken).  Falls back to SERVER_IP env var
-    only if all services fail — and warns if SERVER_IP is a placeholder value.
+    Falls back to SERVER_IP env var only if all services fail.
     """
-    import ipaddress
-    services = [
-        "https://api.ipify.org",
-        "https://ifconfig.me/ip",
-        "https://ipecho.net/plain",
-        # IP-literal fallbacks — bypass DNS so these work even if DNS is broken
-        "http://169.254.169.254/latest/meta-data/public-ipv4",   # AWS
-    ]
-    for url in services:
-        try:
-            async with httpx.AsyncClient(timeout=5) as c:
-                r = await c.get(url, headers={"Accept": "text/plain"})
-                if r.status_code == 200:
-                    ip = r.text.strip().split()[0]  # strip any whitespace/trailing chars
-                    try:
-                        ipaddress.ip_address(ip)   # validate it's a real IP
-                        if ip not in _PLACEHOLDER_IPS:
-                            return ip
-                    except ValueError:
-                        continue
-        except Exception:
-            continue
+    for url in _IPV4_SERVICES:
+        ip = await _fetch_ip(url, family=4)
+        if ip and ip not in _PLACEHOLDER_IPS:
+            return ip
     if SERVER_IP in _PLACEHOLDER_IPS:
         log.warning(
-            "SERVER_IP is '%s' (placeholder) — all IP-detection services failed. "
+            "SERVER_IP is '%s' (placeholder) — all IPv4-detection services failed. "
             "Set SERVER_IP in .env to the real server IP.",
             SERVER_IP,
         )
     return SERVER_IP
 
 
-async def sync_zone_ns(domain_name: str, ip: str) -> bool:
-    """Upsert NS records and glue A records for *domain_name* pointing to *ip*.
+async def get_external_ipv6() -> str:
+    """Detect the server's external IPv6 address, if one exists.
+
+    Returns an empty string if the server has no public IPv6.
+    """
+    for url in _IPV6_SERVICES:
+        ip = await _fetch_ip(url, family=6)
+        if ip and ip not in _PLACEHOLDER_IPV6:
+            return ip
+    return ""
+
+
+async def sync_zone_ns(domain_name: str, ip: str, ipv6: str = "") -> bool:
+    """Upsert NS records and glue A/AAAA records for *domain_name*.
 
     Each zone gets 5 NS records:
       ns1/ns2/ns3.{PANEL_DOMAIN}  — master nameservers (shared, hosted on this server)
       ns1/ns2.{domain_name}       — domain-specific nameservers
 
-    A records (glue) are written inside each zone for the domain-specific NS:
-      ns1.{domain_name} → ip
-      ns2.{domain_name} → ip
+    A (and AAAA if *ipv6* is provided) glue records are written for the
+    domain-specific NS names inside this zone.
 
     Master NS glue (ns1-3.{PANEL_DOMAIN}) is maintained in the panel's own zone
     by sync_panel_ns_zone().
 
     The zone must already exist. Returns True on success.
     """
-    panel_domain = PANEL_DOMAIN or domain_name  # fallback: use domain itself as master
+    panel_domain = PANEL_DOMAIN or domain_name
     master_ns    = [f"ns1.{panel_domain}", f"ns2.{panel_domain}", f"ns3.{panel_domain}"]
     domain_ns1, domain_ns2 = f"ns1.{domain_name}", f"ns2.{domain_name}"
 
-    # Deduplicate while preserving order (handles PANEL_DOMAIN == domain_name)
     all_ns = list(dict.fromkeys(master_ns + [domain_ns1, domain_ns2]))
 
     zone = _z(domain_name)
     rrsets = [
-        # Domain-specific glue A records inside this zone
         _a(domain_ns1, ip, ttl=86400),
         _a(domain_ns2, ip, ttl=86400),
-        # NS rrset for the zone
         _ns_rrset(domain_name, all_ns),
     ]
+    if ipv6:
+        rrsets += [
+            _aaaa(domain_ns1, ipv6, ttl=86400),
+            _aaaa(domain_ns2, ipv6, ttl=86400),
+        ]
     async with panel_client(timeout=15) as client:
         if not await _ensure_zone(client, zone):
             log.error("NS sync skipped for %s — zone not available", domain_name)
             return False
         ok = await _pdns_patch_with_retry(client, zone, rrsets)
         if ok:
-            log.info("NS sync: %s → %d NS records → %s", domain_name, len(all_ns), ip)
+            log.info("NS sync: %s → %d NS records → %s%s",
+                     domain_name, len(all_ns), ip, f" / {ipv6}" if ipv6 else "")
         else:
             log.error("NS sync failed for %s", domain_name)
         return ok
 
 
-async def sync_panel_ns_zone(ip: str) -> bool:
-    """Ensure ns1/ns2/ns3.{PANEL_DOMAIN} A records and NS rrset exist in the panel zone.
+async def sync_panel_ns_zone(ip: str, ipv6: str = "") -> bool:
+    """Ensure ns1/ns2/ns3.{PANEL_DOMAIN} A/AAAA records and NS rrset exist in the panel zone.
 
-    The panel's own zone needs:
-      - NS records pointing to ns1-3.PANEL_DOMAIN (the zone delegates to itself)
-      - A records for ns1/ns2/ns3 so external resolvers can find the nameservers
-
-    This is called on startup and whenever the external IP changes.
+    Written on startup and whenever the external IP changes.
     """
     if not PANEL_DOMAIN:
         return False
-    zone  = _z(PANEL_DOMAIN)
-    ns1   = f"ns1.{PANEL_DOMAIN}"
-    ns2   = f"ns2.{PANEL_DOMAIN}"
-    ns3   = f"ns3.{PANEL_DOMAIN}"
+    zone = _z(PANEL_DOMAIN)
+    ns1  = f"ns1.{PANEL_DOMAIN}"
+    ns2  = f"ns2.{PANEL_DOMAIN}"
+    ns3  = f"ns3.{PANEL_DOMAIN}"
     rrsets = [
-        # NS delegation for the panel zone itself
         _ns_rrset(PANEL_DOMAIN, [ns1, ns2, ns3]),
-        # Glue A records for ns1-3
         _a(ns1, ip, ttl=86400),
         _a(ns2, ip, ttl=86400),
         _a(ns3, ip, ttl=86400),
     ]
+    if ipv6:
+        rrsets += [
+            _aaaa(ns1, ipv6, ttl=86400),
+            _aaaa(ns2, ipv6, ttl=86400),
+            _aaaa(ns3, ipv6, ttl=86400),
+        ]
     async with panel_client(timeout=15) as client:
         if not await _ensure_zone(client, zone):
             log.error("Panel NS zone ensure failed for %s", PANEL_DOMAIN)
             return False
         ok = await _pdns_patch_with_retry(client, zone, rrsets)
         if ok:
-            log.info("Panel NS zone synced: ns1-3.%s → %s", PANEL_DOMAIN, ip)
+            log.info("Panel NS zone synced: ns1-3.%s → %s%s",
+                     PANEL_DOMAIN, ip, f" / {ipv6}" if ipv6 else "")
         else:
             log.error("Panel NS zone sync incomplete for %s", PANEL_DOMAIN)
         return ok
 
 
-async def sync_all_ns(domains: list["Domain"], ip: str = "") -> dict:
-    """Update NS1/NS2/NS3 records for every domain zone with *ip*.
+async def sync_all_ns(domains: list["Domain"], ip: str = "", ipv6: str = "") -> dict:
+    """Update NS records (A + AAAA glue) for every domain zone.
 
     Returns {"updated": [...], "errors": [...]}
     """
-    server_ip = ip or SERVER_IP
+    server_ip = ip or _effective_ip or SERVER_IP
     if not server_ip:
         return {"updated": [], "errors": ["SERVER_IP not set"]}
     updated: list[str] = []
     errors:  list[str] = []
     for domain in domains:
-        ok = await sync_zone_ns(domain.name, server_ip)
+        ok = await sync_zone_ns(domain.name, server_ip, ipv6=ipv6)
         (updated if ok else errors).append(domain.name)
-    return {"updated": updated, "errors": errors, "ip": server_ip}
+    return {"updated": updated, "errors": errors, "ip": server_ip, "ipv6": ipv6 or None}
 
 
 async def sync_all_domains(domains: list["Domain"], server_ip: str = "") -> dict:
@@ -705,7 +774,7 @@ async def sync_all_domains(domains: list["Domain"], server_ip: str = "") -> dict
 
     Returns: {"provisioned": [...], "deleted": [...], "errors": [...]}
     """
-    ip        = server_ip or SERVER_IP
+    ip        = server_ip or _effective_ip or SERVER_IP
     mail_host = f"mail.{PANEL_DOMAIN}" if PANEL_DOMAIN else ""
 
     provisioned: list[str] = []
