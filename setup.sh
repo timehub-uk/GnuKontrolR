@@ -111,12 +111,13 @@ cmd_install() {
   echo -e "${BOLD}  Installation Checklist${NC}"
   echo -e "${DIM}  ──────────────────────────────────────────────────────────${NC}"
   echo -e "  ${DIM}Step 1${NC}  System packages & Docker Engine"
-  echo -e "  ${DIM}Step 2${NC}  System users, groups"
-  echo -e "  ${DIM}Step 3${NC}  Host directories & permissions"
-  echo -e "  ${DIM}Step 4${NC}  Environment configuration (.env)"
-  echo -e "  ${DIM}Step 5${NC}  Panel SSH keypair"
-  echo -e "  ${DIM}Step 6${NC}  Docker image builds"
-  echo -e "  ${DIM}Step 7${NC}  Start services & create admin account"
+  echo -e "  ${DIM}Step 2${NC}  OS kernel & system tuning"
+  echo -e "  ${DIM}Step 3${NC}  System users, groups"
+  echo -e "  ${DIM}Step 4${NC}  Host directories & permissions"
+  echo -e "  ${DIM}Step 5${NC}  Environment configuration (.env)"
+  echo -e "  ${DIM}Step 6${NC}  Panel SSH keypair"
+  echo -e "  ${DIM}Step 7${NC}  Docker image builds"
+  echo -e "  ${DIM}Step 8${NC}  Start services & create admin account"
   echo -e "${DIM}  ──────────────────────────────────────────────────────────${NC}\n"
 
   step "Step 1 / 7 — System packages & Docker Engine"
@@ -169,6 +170,73 @@ https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
   ok "docker compose  $(docker compose version --short)"
   done_step
 
+  step "Step 2 / 8 — OS kernel & system tuning"
+
+  # ── sysctl — kernel parameters ────────────────────────────────────────────
+  # Written to a drop-in file so it survives reboots without touching the
+  # main sysctl.conf.  Idempotent: overwritten on every run.
+  SYSCTL_CONF=/etc/sysctl.d/99-gnukontrolr.conf
+  cat > "$SYSCTL_CONF" <<'SYSCTL'
+# GnuKontrolR OS tuning — managed by setup.sh, do not edit manually
+
+# Redis: vm.overcommit_memory=1 is REQUIRED so Redis can fork for background
+# saves (BGSAVE / AOF rewrite).  Without it Redis logs:
+#   "Can't save in background: fork: Cannot allocate memory"
+vm.overcommit_memory = 1
+
+# Reduce swap aggressiveness — prefer keeping hot data in RAM.
+vm.swappiness = 10
+
+# Larger SYN queue — prevents dropped connections during traffic spikes.
+net.ipv4.tcp_max_syn_backlog = 4096
+net.core.netdev_max_backlog  = 4096
+SYSCTL
+  sysctl --system -q 2>/dev/null || sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
+  ok "sysctl tuning applied  (${SYSCTL_CONF})"
+
+  # ── Transparent HugePages ──────────────────────────────────────────────────
+  # Both Redis and MariaDB perform worse with THP and emit startup warnings.
+  # Disable at runtime and persist via a systemd oneshot unit.
+  _thp_disable() {
+    local p
+    for p in /sys/kernel/mm/transparent_hugepage/enabled \
+              /sys/kernel/mm/transparent_hugepage/defrag; do
+      [[ -f "$p" ]] && echo never > "$p"
+    done
+  }
+  _thp_disable
+  ok "Transparent HugePages disabled (runtime)"
+
+  if [[ ! -f /etc/systemd/system/disable-thp.service ]]; then
+    cat > /etc/systemd/system/disable-thp.service <<'UNIT'
+[Unit]
+Description=Disable Transparent HugePages (required by Redis and MariaDB)
+DefaultDependencies=no
+After=sysinit.target local-fs.target
+Before=basic.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/enabled; echo never > /sys/kernel/mm/transparent_hugepage/defrag'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=basic.target
+UNIT
+    systemctl daemon-reload
+  fi
+  systemctl enable --now disable-thp.service 2>/dev/null || true
+  ok "Transparent HugePages disabled (persistent — disable-thp.service)"
+
+  # ── Grafana provisioning subdirectories ───────────────────────────────────
+  # Grafana v10+ fails to start if these subdirs are missing under provisioning/
+  for _d in docker/grafana/provisioning/plugins docker/grafana/provisioning/alerting; do
+    [[ -d "$_d" ]] || mkdir -p "$_d"
+  done
+  ok "Grafana provisioning dirs ensured"
+
+  done_step
+
   # ── UID/GID constants ──────────────────────────────────────────────────────
   # panelapi user inside the webpanel container is UID/GID 999.
   # Host bind-mount dirs must be owned by numeric 999 so panelapi can r/w.
@@ -177,7 +245,7 @@ https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
   # Docker socket GID — webpanel container uses group_add to gain access.
   DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 984)
 
-  step "Step 2 / 7 — System users & groups"
+  step "Step 3 / 8 — System users & groups"
 
   # ── Groups ────────────────────────────────────────────────────────────────
   # gnukontrolr  (GID 999) — maps to panelapi inside containers
@@ -214,7 +282,7 @@ https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
 
   done_step
 
-  step "Step 3 / 7 — Host directories & permissions"
+  step "Step 4 / 8 — Host directories & permissions"
 
   # Format: "path:owner:group:mode:description"
   declare -a HOST_DIRS=(
@@ -246,7 +314,7 @@ https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
 
   done_step
 
-  step "Step 4 / 7 — Environment (.env)"
+  step "Step 5 / 8 — Environment (.env)"
 
   if [[ ! -f .env ]]; then
     info "Generating .env — please answer a few questions:"
@@ -326,7 +394,7 @@ EOF
 
   done_step
 
-  step "Step 5 / 7 — Panel SSH keypair"
+  step "Step 6 / 8 — Panel SSH keypair"
 
   PANEL_SSH_DIR=/var/webpanel/panel_ssh
   if [[ ! -f "${PANEL_SSH_DIR}/id_ecdsa" ]]; then
@@ -344,7 +412,7 @@ EOF
 
   done_step
 
-  step "Step 6 / 7 — Docker image builds"
+  step "Step 7 / 8 — Docker image builds"
 
   spin "Pulling nginx:alpine"   docker pull nginx:alpine   --quiet
   spin "Pulling mysql:8.4"      docker pull mysql:8.4      --quiet
@@ -377,7 +445,7 @@ EOF
 
   done_step
 
-  step "Step 7 / 7 — Start services & create admin account"
+  step "Step 8 / 8 — Start services & create admin account"
 
   info "Starting all services..."
   dc up -d --remove-orphans

@@ -138,6 +138,12 @@ RUN mkdir -p /var/run/mysqld \
     && chown mysql:mysql /var/run/mysqld \
     && chmod 755 /var/run/mysqld
 
+# Disable native AIO — io_uring is blocked by Docker's default seccomp profile,
+# causing MariaDB to log 'EPERM' errors and fall back slowly. Explicitly disable
+# it so MariaDB uses pread/pwrite from the start.
+RUN echo -e '[mysqld]\ninnodb_use_native_aio=0' \
+    > /etc/mysql/mariadb.conf.d/99-container.cnf
+
 RUN mkdir -p \
         /var/www/html \
         /var/customer/uploads \
