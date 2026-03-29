@@ -770,21 +770,25 @@ cmd_reset_pass() {
   read -rsp "Confirm: " NPASS2; echo
   [[ "$NPASS" == "$NPASS2" ]] || die "Passwords do not match"
 
-  dc exec -T webpanel python3 - <<PYEOF
-import asyncio, sys
+  # Pass values as env vars — never interpolate user input into Python source code
+  GNK_UNAME="$UNAME" GNK_NPASS="$NPASS" dc exec -T -e GNK_UNAME -e GNK_NPASS webpanel python3 - <<'PYEOF'
+import asyncio, sys, os
 sys.path.insert(0, '/app')
 from app.database import init_db, AsyncSessionLocal
 from app.models.user import User
 from app.auth import hash_password
 from sqlalchemy import select
 
+uname = os.environ["GNK_UNAME"]
+npass = os.environ["GNK_NPASS"]
+
 async def main():
     await init_db()
     async with AsyncSessionLocal() as db:
-        u = (await db.execute(select(User).where(User.username == '${UNAME}'))).scalar_one_or_none()
+        u = (await db.execute(select(User).where(User.username == uname))).scalar_one_or_none()
         if not u:
             print('User not found'); return
-        u.hashed_password = hash_password('${NPASS}')
+        u.hashed_password = hash_password(npass)
         await db.commit()
         print(f'Password updated for {u.username}')
 
@@ -800,33 +804,40 @@ cmd_add_user() {
   read -rp "Role [user/admin/reseller/superadmin] (default: user): " UROLE
   UROLE="${UROLE:-user}"
 
-  dc exec -T webpanel python3 - <<PYEOF
-import asyncio, sys
+  # Pass values as env vars — never interpolate user input into Python source code
+  GNK_UNAME="$UNAME" GNK_UEMAIL="$UEMAIL" GNK_UPASS="$UPASS" GNK_UROLE="$UROLE" \
+    dc exec -T -e GNK_UNAME -e GNK_UEMAIL -e GNK_UPASS -e GNK_UROLE webpanel python3 - <<'PYEOF'
+import asyncio, sys, os
 sys.path.insert(0, '/app')
 from app.database import init_db, AsyncSessionLocal
 from app.models.user import User, Role
 from app.auth import hash_password
 from sqlalchemy import select
 
+uname = os.environ["GNK_UNAME"]
+uemail = os.environ["GNK_UEMAIL"]
+upass = os.environ["GNK_UPASS"]
+urole_str = os.environ["GNK_UROLE"]
+
 async def main():
     await init_db()
     async with AsyncSessionLocal() as db:
-        existing = (await db.execute(select(User).where(User.username == '${UNAME}'))).scalar_one_or_none()
+        existing = (await db.execute(select(User).where(User.username == uname))).scalar_one_or_none()
         if existing:
             print('User already exists'); return
         try:
-            role = Role('${UROLE}')
+            role = Role(urole_str)
         except ValueError:
-            print(f'Invalid role: ${UROLE}. Valid: user, admin, reseller, superadmin'); return
+            print(f'Invalid role: {urole_str}. Valid: user, admin, reseller, superadmin'); return
         user = User(
-            username='${UNAME}',
-            email='${UEMAIL}',
-            hashed_password=hash_password('${UPASS}'),
+            username=uname,
+            email=uemail,
+            hashed_password=hash_password(upass),
             role=role,
         )
         db.add(user)
         await db.commit()
-        print(f'User ${UNAME} created (role=${UROLE})')
+        print(f'User {uname} created (role={urole_str})')
 
 asyncio.run(main())
 PYEOF

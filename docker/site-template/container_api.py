@@ -483,9 +483,17 @@ def set_nginx_config():
     name    = re.sub(r"[^a-z0-9_-]", "", body.get("name", "custom"))
     content = body.get("content", "")
     conf_file = NGINX_CONF_DIR / f"{name}.conf"
+    old_content = conf_file.read_text() if conf_file.exists() else None
     _backup_file(conf_file)
     conf_file.write_text(content)
-    # Reload nginx
+    # Test config before reloading — restore previous on failure
+    test = subprocess.run(["nginx", "-t"], capture_output=True, text=True, timeout=10)
+    if test.returncode != 0:
+        if old_content is not None:
+            conf_file.write_text(old_content)
+        else:
+            conf_file.unlink(missing_ok=True)
+        abort(400, description=f"nginx config syntax error: {test.stderr.strip()}")
     subprocess.run(["supervisorctl", "restart", "nginx"], timeout=10)
     return jsonify({"ok": True, "file": str(conf_file)})
 
@@ -497,12 +505,32 @@ def list_nginx_configs():
     return jsonify({"configs": files})
 
 
+_PHP_DANGEROUS_DIRECTIVES = {
+    "disable_functions", "disable_classes", "open_basedir",
+    "allow_url_fopen", "allow_url_include", "enable_dl",
+    "auto_prepend_file", "auto_append_file",
+}
+
+def _check_php_ini(content: str):
+    """Reject lines that clear security-critical PHP directives."""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(";") or "=" not in stripped:
+            continue
+        key, _, val = stripped.partition("=")
+        key = key.strip().lower()
+        val = val.strip().strip('"').strip("'")
+        if key in _PHP_DANGEROUS_DIRECTIVES and val in ("", "none", "0", "false", "off", "no"):
+            abort(400, description=f"Setting '{key}' to empty/off is not permitted")
+
+
 @app.post("/secure/php")
 def set_php_config():
     """Write a PHP ini override file."""
     _verify_token()
     body = request.json or {}
     content = body.get("content", "")
+    _check_php_ini(content)
     ini_file = PHP_CONF_DIR / "customer.ini"
     _backup_file(ini_file)
     ini_file.write_text(content)
@@ -518,6 +546,20 @@ def get_php_config():
     return jsonify({"content": content})
 
 
+def _validate_pem(data: str, label: str):
+    """Raise 400 if data doesn't look like a valid PEM block."""
+    stripped = data.strip()
+    if not stripped.startswith("-----BEGIN ") or "-----END " not in stripped:
+        abort(400, description=f"Invalid PEM format for {label}: missing header/footer")
+    # Verify the base64 body decodes without error
+    import base64 as _b64
+    lines = [l for l in stripped.splitlines() if not l.startswith("-----")]
+    try:
+        _b64.b64decode("".join(lines), validate=True)
+    except Exception:
+        abort(400, description=f"Invalid PEM format for {label}: base64 decode failed")
+
+
 @app.post("/secure/ssl")
 def upload_ssl():
     """Store SSL cert + key in the secure area."""
@@ -526,9 +568,11 @@ def upload_ssl():
     cert = body.get("cert", "")
     key  = body.get("key", "")
     if cert:
+        _validate_pem(cert, "certificate")
         _backup_file(SSL_DIR / "site.crt")
         (SSL_DIR / "site.crt").write_text(cert)
     if key:
+        _validate_pem(key, "private key")
         _backup_file(SSL_DIR / "site.key")
         (SSL_DIR / "site.key").write_text(key)
         (SSL_DIR / "site.key").chmod(0o600)
@@ -621,11 +665,10 @@ def _push(job_id: str, msg: str):
 def _mysql_exec(sql: str) -> tuple[bool, str]:
     """Execute SQL on the private local MariaDB instance via unix socket."""
     root_pass = _mysql_root_pass()
-    cmd = ["mysql", "--socket=/var/run/mysqld/mysqld.sock", "-uroot", "--batch", "--silent"]
-    if root_pass:
-        cmd += [f"-p{root_pass}"]
-    cmd += ["-e", sql]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    cmd = ["mysql", "--socket=/var/run/mysqld/mysqld.sock", "-uroot", "--batch", "--silent", "-e", sql]
+    # Pass password via MYSQL_PWD env var so it never appears in ps aux / proc cmdline
+    env = {**os.environ, "MYSQL_PWD": root_pass} if root_pass else dict(os.environ)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
     return r.returncode == 0, (r.stderr or r.stdout).strip()
 
 

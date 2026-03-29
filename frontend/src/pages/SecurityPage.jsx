@@ -220,6 +220,7 @@ function SslOverview({ domains }) {
 function SecurityEventFeed() {
   const [events,  setEvents]  = useState([]);
   const [loading, setLoading] = useState(true);
+  const [fetchErr, setFetchErr] = useState(null);
 
   useEffect(() => {
     api.get('/api/log/me?limit=200')
@@ -228,8 +229,11 @@ function SecurityEventFeed() {
           .filter(e => [401, 403, 429, 500, 503].includes(e.status))
           .slice(0, 50);
         setEvents(security);
+        setFetchErr(null);
       })
-      .catch(() => {})
+      .catch(err => {
+        setFetchErr(err?.response?.data?.detail || 'Failed to load security events.');
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -260,6 +264,8 @@ function SecurityEventFeed() {
       </h2>
       {loading ? (
         <p className="text-sm text-gray-500 flex items-center gap-2"><Loader size={13} className="animate-spin" /> Loading…</p>
+      ) : fetchErr ? (
+        <p className="text-sm text-red-400">{fetchErr}</p>
       ) : events.length === 0 ? (
         <div className="text-center py-4">
           <ShieldCheck size={18} className="mx-auto mb-1.5 text-green-500" />
