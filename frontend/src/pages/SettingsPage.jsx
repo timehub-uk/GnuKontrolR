@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings, Key, User, Lock, CheckCircle, ExternalLink, Contact, Globe, Server } from 'lucide-react';
+import { Settings, Key, User, Lock, CheckCircle, ExternalLink, Contact, Globe, Server, ScrollText } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
 
@@ -469,6 +469,139 @@ function PanelConfigCard() {
   );
 }
 
+const LICENSE_BADGE = {
+  'MIT':          'bg-green-500/15 text-green-300 border-green-500/30',
+  'Apache 2.0':   'bg-blue-500/15 text-blue-300 border-blue-500/30',
+  'GPL v2':       'bg-orange-500/15 text-orange-300 border-orange-500/30',
+  'GPL v3':       'bg-orange-500/15 text-orange-300 border-orange-500/30',
+  'AGPL v3':      'bg-red-500/15 text-red-300 border-red-500/30',
+  'BSD 3-Clause': 'bg-purple-500/15 text-purple-300 border-purple-500/30',
+  'BSD 2-Clause': 'bg-purple-500/15 text-purple-300 border-purple-500/30',
+  'LGPL v2.1':    'bg-yellow-500/15 text-yellow-300 border-yellow-500/30',
+  'PSF':          'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
+  'EPL 2.0':      'bg-teal-500/15 text-teal-300 border-teal-500/30',
+  'ISC':          'bg-green-500/15 text-green-300 border-green-500/30',
+};
+
+const SERVICES = [
+  {
+    category: 'Infrastructure',
+    items: [
+      { name: 'Docker Engine',      version: '27+',      license: 'Apache 2.0',   url: 'https://github.com/moby/moby/blob/master/LICENSE',                   desc: 'Container runtime' },
+      { name: 'Docker Compose',     version: 'v2',       license: 'Apache 2.0',   url: 'https://github.com/docker/compose/blob/main/LICENSE',               desc: 'Multi-container orchestration' },
+      { name: 'Traefik',            version: 'v3.3',     license: 'MIT',          url: 'https://github.com/traefik/traefik/blob/master/LICENSE.md',          desc: 'Reverse proxy & TLS termination' },
+      { name: 'Nginx',              version: 'alpine',   license: 'BSD 2-Clause', url: 'https://nginx.org/LICENSE',                                          desc: 'Docker API proxy / web server' },
+    ],
+  },
+  {
+    category: 'DNS',
+    items: [
+      { name: 'PowerDNS Authoritative', version: '4.9', license: 'GPL v2',      url: 'https://github.com/PowerDNS/pdns/blob/master/COPYING',               desc: 'Authoritative DNS server' },
+      { name: 'dnsmasq',                version: '2.x',  license: 'GPL v2',      url: 'https://thekelleys.org.uk/dnsmasq/doc.html',                         desc: 'Local DNS resolver (localdns)' },
+    ],
+  },
+  {
+    category: 'Databases & Cache',
+    items: [
+      { name: 'MySQL',              version: '8.4',      license: 'GPL v2',       url: 'https://www.mysql.com/about/legal/licensing/osl/',                   desc: 'Relational database (Community Edition)' },
+      { name: 'MariaDB',            version: '10.x',     license: 'GPL v2',       url: 'https://mariadb.com/kb/en/mariadb-license/',                         desc: 'Customer site database (in site containers)' },
+      { name: 'Redis',              version: '8',        license: 'BSD 3-Clause', url: 'https://github.com/redis/redis/blob/unstable/COPYING',               desc: 'Cache & session store (Redis 7.x and below)' },
+      { name: 'SQLite',             version: '3',        license: 'Public Domain', url: 'https://www.sqlite.org/copyright.html',                             desc: 'Panel SQLite database' },
+    ],
+  },
+  {
+    category: 'Mail',
+    items: [
+      { name: 'Postfix',            version: 'latest',   license: 'EPL 2.0',      url: 'https://www.postfix.org/IBM-Public-License-1.0.txt',                 desc: 'Outbound SMTP' },
+      { name: 'Dovecot',            version: 'latest',   license: 'MIT',          url: 'https://github.com/dovecot/core/blob/main/COPYING',                  desc: 'IMAP/POP3 server' },
+      { name: 'OpenDKIM',           version: '2.x',      license: 'BSD 3-Clause', url: 'https://github.com/trusteddomainproject/OpenDKIM/blob/master/LICENSE', desc: 'DKIM signing milter' },
+    ],
+  },
+  {
+    category: 'Monitoring',
+    items: [
+      { name: 'Prometheus',         version: 'latest',   license: 'Apache 2.0',   url: 'https://github.com/prometheus/prometheus/blob/main/LICENSE',         desc: 'Metrics collection' },
+      { name: 'Grafana',            version: 'latest',   license: 'AGPL v3',      url: 'https://github.com/grafana/grafana/blob/main/LICENSE',               desc: 'Metrics dashboards' },
+      { name: 'Node Exporter',      version: 'latest',   license: 'Apache 2.0',   url: 'https://github.com/prometheus/node_exporter/blob/master/LICENSE',    desc: 'Host metrics exporter' },
+      { name: 'cAdvisor',           version: 'latest',   license: 'Apache 2.0',   url: 'https://github.com/google/cadvisor/blob/master/LICENSE',             desc: 'Container metrics exporter' },
+    ],
+  },
+  {
+    category: 'Backend',
+    items: [
+      { name: 'Python',             version: '3.12',     license: 'PSF',          url: 'https://docs.python.org/3/license.html',                             desc: 'Runtime language' },
+      { name: 'FastAPI',            version: '0.x',      license: 'MIT',          url: 'https://github.com/fastapi/fastapi/blob/master/LICENSE',             desc: 'API framework' },
+      { name: 'SQLAlchemy',         version: '2.x',      license: 'MIT',          url: 'https://github.com/sqlalchemy/sqlalchemy/blob/main/LICENSE',         desc: 'ORM / async DB access' },
+      { name: 'Uvicorn',            version: '0.x',      license: 'BSD 3-Clause', url: 'https://github.com/encode/uvicorn/blob/master/LICENSE.md',           desc: 'ASGI server' },
+      { name: 'httpx',              version: '0.x',      license: 'BSD 3-Clause', url: 'https://github.com/encode/httpx/blob/master/LICENSE.md',             desc: 'Async HTTP client' },
+      { name: 'python-jose',        version: '3.x',      license: 'MIT',          url: 'https://github.com/mpdavis/python-jose/blob/master/LICENSE',         desc: 'JWT tokens' },
+      { name: 'Cryptography',       version: '42+',      license: 'Apache 2.0',   url: 'https://github.com/pyca/cryptography/blob/main/LICENSE',             desc: 'DKIM key generation' },
+      { name: 'ClamAV',             version: '1.x',      license: 'GPL v2',       url: 'https://www.clamav.net/about',                                       desc: 'Malware scanning (site containers)' },
+    ],
+  },
+  {
+    category: 'Frontend',
+    items: [
+      { name: 'React',              version: '18',       license: 'MIT',          url: 'https://github.com/facebook/react/blob/main/LICENSE',                desc: 'UI framework' },
+      { name: 'Vite',               version: '5',        license: 'MIT',          url: 'https://github.com/vitejs/vite/blob/main/LICENSE',                   desc: 'Build tool' },
+      { name: 'Tailwind CSS',       version: '3',        license: 'MIT',          url: 'https://github.com/tailwindlabs/tailwindcss/blob/master/LICENSE',    desc: 'Utility-first CSS' },
+      { name: 'Lucide React',       version: '0.x',      license: 'ISC',          url: 'https://github.com/lucide-icons/lucide/blob/main/LICENSE',           desc: 'Icon library' },
+      { name: 'xterm.js',           version: '5',        license: 'MIT',          url: 'https://github.com/xtermjs/xterm.js/blob/master/LICENSE',            desc: 'Browser terminal emulator' },
+      { name: 'Axios',              version: '1.x',      license: 'MIT',          url: 'https://github.com/axios/axios/blob/v1.x/LICENSE',                   desc: 'HTTP client' },
+    ],
+  },
+];
+
+function LicensesCard() {
+  return (
+    <div className="space-y-6">
+      <div className="card">
+        <p className="text-xs text-ink-muted leading-relaxed">
+          GnuKontrolR is built on open-source software. The following third-party components are
+          used under their respective licenses. Click any license badge or service name to view
+          the full license text.
+        </p>
+      </div>
+
+      {SERVICES.map(group => (
+        <div key={group.category} className="card space-y-1 p-0 overflow-hidden">
+          <div className="px-4 py-2.5 bg-panel-800 border-b border-panel-subtle">
+            <h3 className="text-xs font-semibold text-ink-muted uppercase tracking-wider">
+              {group.category}
+            </h3>
+          </div>
+          <div className="divide-y divide-panel-subtle">
+            {group.items.map(item => (
+              <div key={item.name} className="flex items-center gap-3 px-4 py-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-ink-primary">{item.name}</span>
+                    <span className="text-xs text-ink-faint font-mono">{item.version}</span>
+                  </div>
+                  <p className="text-xs text-ink-muted mt-0.5 truncate">{item.desc}</p>
+                </div>
+                <a
+                  href={item.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={`shrink-0 inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full border transition-opacity hover:opacity-80 ${LICENSE_BADGE[item.license] || 'bg-gray-500/15 text-gray-300 border-gray-500/30'}`}
+                >
+                  {item.license}
+                  <ExternalLink size={9} />
+                </a>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      <p className="text-[11px] text-ink-faint text-center pb-2">
+        This list covers direct runtime dependencies. Each package may have its own transitive dependencies under separate licenses.
+      </p>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const { user, refreshUser } = useAuth();
   const [tab, setTab] = useState('account');
@@ -491,9 +624,10 @@ export default function SettingsPage() {
   const isSuperadmin = user?.role === 'superadmin';
 
   const tabs = [
-    { id: 'account',      label: 'Account',       icon: User,   show: true          },
-    { id: 'ai_keys',      label: 'AI Keys',        icon: Key,    show: true          },
-    { id: 'panel_config', label: 'Panel',          icon: Server, show: isSuperadmin  },
+    { id: 'account',      label: 'Account',    icon: User,       show: true         },
+    { id: 'ai_keys',      label: 'AI Keys',    icon: Key,        show: true         },
+    { id: 'panel_config', label: 'Panel',      icon: Server,     show: isSuperadmin },
+    { id: 'licenses',     label: 'Licenses',   icon: ScrollText, show: true         },
   ].filter(t => t.show);
 
   return (
@@ -577,6 +711,9 @@ export default function SettingsPage() {
 
       {/* Panel config tab — superadmin only */}
       {tab === 'panel_config' && isSuperadmin && <PanelConfigCard />}
+
+      {/* Licenses tab */}
+      {tab === 'licenses' && <LicensesCard />}
     </div>
   );
 }
