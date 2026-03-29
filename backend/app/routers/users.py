@@ -87,6 +87,23 @@ async def get_user(user_id: int, db: AsyncSession = Depends(get_db), _=Depends(r
     }
 
 
+@router.patch("/me")
+async def update_my_profile(
+    body: ProfileUpdate,
+    current: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update the currently logged-in user's personal/contact details."""
+    result = await db.execute(select(User).where(User.id == current.id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(404, "User not found")
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(user, field, value)
+    await db.commit()
+    return {"ok": True, "preferred_name": user.preferred_name or ""}
+
+
 @router.patch("/{user_id}")
 async def update_user(user_id: int, body: UserUpdate, db: AsyncSession = Depends(get_db), current=Depends(require_admin)):
     result = await db.execute(select(User).where(User.id == user_id))
@@ -115,23 +132,6 @@ async def update_user(user_id: int, body: UserUpdate, db: AsyncSession = Depends
         except Exception:
             pass
     return {"ok": True}
-
-
-@router.patch("/me")
-async def update_my_profile(
-    body: ProfileUpdate,
-    current: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Update the currently logged-in user's personal/contact details."""
-    result = await db.execute(select(User).where(User.id == current.id))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(404, "User not found")
-    for field, value in body.model_dump(exclude_none=True).items():
-        setattr(user, field, value)
-    await db.commit()
-    return {"ok": True, "preferred_name": user.preferred_name or ""}
 
 
 @router.delete("/{user_id}", status_code=204)

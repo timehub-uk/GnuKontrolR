@@ -262,7 +262,11 @@ function PersonalDetailsCard({ user, onSaved }) {
       setMsg({ type: 'ok', text: 'Details saved.' });
       if (onSaved) onSaved();
     } catch (err) {
-      setMsg({ type: 'err', text: err.response?.data?.detail || 'Save failed.' });
+      const detail = err.response?.data?.detail;
+      const text = Array.isArray(detail)
+        ? detail.map(e => e.msg || String(e)).join(', ')
+        : (detail || 'Save failed.');
+      setMsg({ type: 'err', text });
     } finally {
       setSaving(false);
     }
