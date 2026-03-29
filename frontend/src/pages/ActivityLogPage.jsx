@@ -181,7 +181,7 @@ export default function ActivityLogPage() {
   // SSE live feed — prepends new events as they arrive
   useEffect(() => {
     if (!live) { sseRef.current?.close(); sseRef.current = null; return; }
-    const token = localStorage.getItem('token') || sessionStorage.getItem('token') || '';
+    const token = localStorage.getItem('access_token') || '';
     sseRef.current = createSSE('/api/log/stream', event => {
       setEntries(prev => {
         if (prev.some(e => e.event_id === event.event_id)) return prev;
@@ -256,7 +256,7 @@ export default function ActivityLogPage() {
       )}
 
       <div className="card p-0 overflow-hidden">
-        {/* Column headers */}
+        {/* Column headers — sticky, outside scroll container */}
         <div className="flex items-center gap-3 px-4 py-2 bg-panel-700 text-xs text-gray-500 uppercase font-medium border-b border-panel-600">
           <span className="w-4" />
           <span className="w-14">Method</span>
@@ -267,18 +267,21 @@ export default function ActivityLogPage() {
           <span className="w-28 hidden lg:block">Event ID</span>
         </div>
 
-        {loading ? (
-          <div className="text-center py-10 text-gray-500 text-sm">
-            <Clock size={18} className="mx-auto mb-2 opacity-40 animate-pulse" />
-            Loading…
-          </div>
-        ) : entries.length === 0 ? (
-          <div className="text-center py-10 text-gray-500 text-sm">
-            No activity recorded yet.
-          </div>
-        ) : (
-          entries.map(e => <LogRow key={e.event_id + e.timestamp} entry={e} />)
-        )}
+        {/* Scrollable entry list */}
+        <div className="max-h-[600px] overflow-y-auto">
+          {loading ? (
+            <div className="text-center py-10 text-gray-500 text-sm">
+              <Clock size={18} className="mx-auto mb-2 opacity-40 animate-pulse" />
+              Loading…
+            </div>
+          ) : entries.length === 0 ? (
+            <div className="text-center py-10 text-gray-500 text-sm">
+              No activity recorded yet.
+            </div>
+          ) : (
+            entries.map(e => <LogRow key={e.event_id + e.timestamp} entry={e} />)
+          )}
+        </div>
       </div>
     </div>
   );

@@ -694,5 +694,5 @@ async def all_container_stats(_=Depends(require_admin)):
     Offloaded to a thread pool since docker stats --no-stream blocks ~2s.
     Returns a dict keyed by container name for frontend merging.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _collect_all_stats)

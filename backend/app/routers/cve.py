@@ -132,7 +132,8 @@ async def recent_cves(
         for cfg in configs[:1]:
             for node in cfg.get("nodes", [])[:1]:
                 for cpe in node.get("cpeMatch", [])[:3]:
-                    products.append(cpe.get("criteria", "").split(":")[4] or "")
+                    parts = cpe.get("criteria", "").split(":")
+                    products.append(parts[4] if len(parts) > 4 else "")
 
         items.append({
             "id":        cve_id,

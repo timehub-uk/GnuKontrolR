@@ -110,6 +110,36 @@ require_admin      = require_role(Role.superadmin, Role.admin)
 require_reseller   = require_role(Role.superadmin, Role.admin, Role.reseller)
 
 
+async def get_current_user_query(
+    token: str = "",
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Like get_current_user but reads token from the ?token= query param.
+    Used for SSE and WebSocket endpoints where headers cannot be set."""
+    credentials_exc = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if not token:
+        raise credentials_exc
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "access":
+            raise credentials_exc
+        user_id: Optional[str] = payload.get("sub")
+        if user_id is None:
+            raise credentials_exc
+    except JWTError:
+        raise credentials_exc
+
+    result = await db.execute(select(User).where(User.id == int(user_id)))
+    user = result.scalar_one_or_none()
+    if user is None or not user.is_active or user.is_suspended:
+        raise credentials_exc
+    return user
+
+
 def _decode_token(token: str) -> Optional[int]:
     """
     Lightweight token → user_id decode used by the request-logging middleware.

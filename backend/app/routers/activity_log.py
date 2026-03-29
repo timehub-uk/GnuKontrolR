@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, delete
 
-from app.auth import get_current_user, require_admin
+from app.auth import get_current_user, get_current_user_query, require_admin
 from app.database import get_db
 from app.models.request_log import RequestLog
 from app.models.user import User
@@ -179,7 +179,7 @@ async def _sse_generator(user_id: int, queue: asyncio.Queue) -> AsyncGenerator[s
 
 
 @router.get("/stream")
-async def stream_activity(user: User = Depends(get_current_user)):
+async def stream_activity(user: User = Depends(get_current_user_query)):
     """SSE endpoint — streams new activity log events to the browser in real time."""
     queue: asyncio.Queue = asyncio.Queue(maxsize=100)
     _SSE_CLIENTS.setdefault(user.id, []).append(queue)

@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { HardDrive, History, Plus, Trash2, Download, RefreshCw, AlertTriangle, Loader, Globe, Database, FolderOpen, PackageOpen } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { HardDrive, History, Plus, Trash2, Download, RefreshCw, AlertTriangle, Globe, Database, FolderOpen, PackageOpen } from 'lucide-react';
 import api from '../utils/api';
 import ConfigBackupsPanel from '../components/ConfigBackupsPanel';
+import BackupProgressCard from '../components/BackupProgressCard';
 
 const BACKUP_TYPES = [
   { id: 'website', label: 'Full Website',   icon: Globe,        desc: 'Web files + database dump' },
@@ -30,12 +31,9 @@ export default function BackupsPage() {
   // Full-site backup state
   const [backups,       setBackups]       = useState([]);
   const [loadingList,   setLoadingList]   = useState(false);
-  const [creating,      setCreating]      = useState(false);
-  const [elapsed,       setElapsed]       = useState(0);   // seconds since backup started
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [error,         setError]         = useState('');
-  const [msg,           setMsg]           = useState('');
-  const timerRef = useRef(null);
+  const [activeJob,     setActiveJob]     = useState(null);
 
   useEffect(() => {
     api.get('/api/domains').then(r => {
@@ -60,27 +58,12 @@ export default function BackupsPage() {
   }, [tab, selectedDomain, loadBackups]);
 
   const handleCreate = async () => {
-    setCreating(true);
-    setElapsed(0);
     setError('');
-    setMsg('');
-    // Start elapsed-time ticker
-    timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
     try {
       const r = await api.post(`/api/container/${selectedDomain}/site-backup/create`, { type: backupType });
-      const { filename, size, unique_id, csc_token } = r.data;
-      setMsg(
-        `Backup created: ${filename} (${fmtBytes(size)})` +
-        (unique_id ? `\nID: ${unique_id}` : '') +
-        (csc_token ? `\nCSC: ${csc_token}` : '')
-      );
-      loadBackups();
+      setActiveJob({ jobId: r.data.job_id, backupType });
     } catch (e) {
       setError(e?.response?.data?.detail || 'Backup creation failed');
-    } finally {
-      clearInterval(timerRef.current);
-      setCreating(false);
-      setElapsed(0);
     }
   };
 
@@ -104,8 +87,21 @@ export default function BackupsPage() {
     window.open(a.href + `?token=${token}`, '_blank');
   };
 
+  const handleJobClose = () => {
+    setActiveJob(null);
+    loadBackups();
+  };
+
   return (
     <div className="space-y-5">
+      {activeJob && (
+        <BackupProgressCard
+          domain={selectedDomain}
+          jobId={activeJob.jobId}
+          backupType={activeJob.backupType}
+          onClose={handleJobClose}
+        />
+      )}
       <div>
         <h1 className="text-[20px] font-bold text-ink-primary">Backups</h1>
         <p className="text-[13px] text-ink-muted mt-0.5">Config snapshots and full-site archives per domain</p>
@@ -184,17 +180,10 @@ export default function BackupsPage() {
               </button>
               <button
                 onClick={handleCreate}
-                disabled={creating || !selectedDomain}
+                disabled={!!activeJob || !selectedDomain}
                 className="btn-primary flex items-center gap-1.5 py-1.5 px-3 text-xs min-w-[140px]"
               >
-                {creating ? (
-                  <>
-                    <Loader size={13} className="animate-spin" />
-                    Backing up… {elapsed}s
-                  </>
-                ) : (
-                  <><Plus size={13} /> Create {BACKUP_TYPES.find(b => b.id === backupType)?.label} Backup</>
-                )}
+                <Plus size={13} /> Create {BACKUP_TYPES.find(b => b.id === backupType)?.label} Backup
               </button>
             </div>
           </div>
@@ -202,11 +191,6 @@ export default function BackupsPage() {
           {error && (
             <div className="flex items-center gap-2 text-bad-light bg-bad/10 border border-bad/20 rounded-lg px-4 py-2.5 text-sm">
               <AlertTriangle size={14} /> {error}
-            </div>
-          )}
-          {msg && (
-            <div className="text-ok-light bg-ok/10 border border-ok/20 rounded-lg px-4 py-2.5 text-sm whitespace-pre-wrap font-mono text-[11px]">
-              {msg}
             </div>
           )}
 
