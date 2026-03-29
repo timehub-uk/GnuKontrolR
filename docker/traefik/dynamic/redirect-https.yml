@@ -1,0 +1,28 @@
+# HTTP → HTTPS redirect for all traffic EXCEPT Let's Encrypt ACME challenges.
+#
+# Why: Using entryPoints.web.http.redirections in traefik.yml redirects
+# ALL port-80 traffic including ACME HTTP-01 challenge requests, causing
+# Let's Encrypt to follow the redirect to HTTPS and receive a 500 from the
+# site container instead of the ACME token from Traefik. This causes all
+# SSL certificate renewals to fail.
+#
+# This dynamic router only redirects paths that do NOT start with
+# /.well-known/acme-challenge/, so ACME challenges are served by Traefik
+# directly on port 80 as required by the HTTP-01 spec.
+
+http:
+  routers:
+    redirect-to-https:
+      rule: "!PathPrefix(`/.well-known/acme-challenge/`)"
+      entryPoints:
+        - web
+      middlewares:
+        - redirect-https
+      service: noop@internal
+      priority: 1
+
+  middlewares:
+    redirect-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
