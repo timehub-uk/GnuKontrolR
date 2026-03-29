@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings, Key, User, Lock, CheckCircle, ExternalLink, Contact } from 'lucide-react';
+import { Settings, Key, User, Lock, CheckCircle, ExternalLink, Contact, Globe, Server } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
 
@@ -336,6 +336,139 @@ function PersonalDetailsCard({ user, onSaved }) {
   );
 }
 
+function PanelConfigCard() {
+  const [domains,      setDomains]      = useState([]);
+  const [config,       setConfig]       = useState({ panel_domain: '', server_ip: '', acme_email: '' });
+  const [form,         setForm]         = useState({ panel_domain: '', server_ip: '', acme_email: '' });
+  const [saving,       setSaving]       = useState(false);
+  const [msg,          setMsg]          = useState(null);
+  const [noDomains,    setNoDomains]    = useState(false);
+
+  const load = async () => {
+    try {
+      const [cfgRes, domRes] = await Promise.all([
+        api.get('/api/server/panel-config'),
+        api.get('/api/domains'),
+      ]);
+      const cfg  = cfgRes.data;
+      const doms = domRes.data || [];
+      setConfig(cfg);
+      setForm({ panel_domain: cfg.panel_domain || '', server_ip: cfg.server_ip || '', acme_email: cfg.acme_email || '' });
+      setDomains(doms);
+      setNoDomains(doms.length === 0);
+    } catch {
+      setMsg({ type: 'err', text: 'Failed to load panel config.' });
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    if (!form.panel_domain) return;
+    setSaving(true);
+    setMsg(null);
+    try {
+      const { data } = await api.patch('/api/server/panel-config', form);
+      setMsg({
+        type: 'ok',
+        text: `Saved. NS updated for ${data.ns_updated} domain(s).${data.errors?.length ? ` Errors: ${data.errors.join(', ')}` : ''}`,
+      });
+      await load();
+    } catch (err) {
+      setMsg({ type: 'err', text: err.response?.data?.detail || 'Save failed.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  return (
+    <div className="card space-y-5">
+      <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+        <Globe size={14} /> Panel &amp; DNS Configuration
+      </h2>
+
+      {noDomains && (
+        <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/30 px-4 py-3 text-sm text-yellow-300">
+          No domains have been added yet. Add a domain first, then set it as the master domain here.
+        </div>
+      )}
+
+      {/* Master domain */}
+      <div>
+        <label className="block text-xs font-medium text-ink-muted mb-1">
+          Master Domain <span className="text-ink-faint">(NS1/NS2/NS3 will be set under this domain)</span>
+        </label>
+        {domains.length > 0 ? (
+          <select
+            className="input w-full text-sm"
+            value={form.panel_domain}
+            onChange={e => set('panel_domain', e.target.value)}
+          >
+            <option value="">— select master domain —</option>
+            {domains.map(d => (
+              <option key={d.name} value={d.name}>{d.name}</option>
+            ))}
+          </select>
+        ) : (
+          <input
+            className="input w-full text-sm"
+            type="text"
+            placeholder="e.g. yourdomain.com"
+            value={form.panel_domain}
+            onChange={e => set('panel_domain', e.target.value)}
+          />
+        )}
+        {config.panel_domain && (
+          <p className="text-[11px] text-ink-faint mt-1">
+            Current: <span className="font-mono text-brand-light">{config.panel_domain}</span>
+            &nbsp;→ NS records: ns1.{config.panel_domain}, ns2.{config.panel_domain}, ns3.{config.panel_domain}
+          </p>
+        )}
+      </div>
+
+      {/* Server IP (read-only display + optional override) */}
+      <div>
+        <label className="block text-xs font-medium text-ink-muted mb-1">
+          Server IP <span className="text-ink-faint">(auto-detected hourly — override only if needed)</span>
+        </label>
+        <input
+          className="input w-full text-sm font-mono"
+          type="text"
+          placeholder={config.server_ip || 'Auto-detected'}
+          value={form.server_ip}
+          onChange={e => set('server_ip', e.target.value)}
+        />
+      </div>
+
+      {/* ACME email */}
+      <div>
+        <label className="block text-xs font-medium text-ink-muted mb-1">Let's Encrypt Email</label>
+        <input
+          className="input w-full text-sm"
+          type="email"
+          placeholder={config.acme_email || 'admin@yourdomain.com'}
+          value={form.acme_email}
+          onChange={e => set('acme_email', e.target.value)}
+        />
+      </div>
+
+      {msg && (
+        <p className={`text-xs ${msg.type === 'ok' ? 'text-ok' : 'text-bad-light'}`}>{msg.text}</p>
+      )}
+
+      <button
+        onClick={save}
+        disabled={saving || !form.panel_domain}
+        className="btn-primary text-sm disabled:opacity-50"
+      >
+        {saving ? 'Saving & syncing DNS…' : 'Save & Sync DNS'}
+      </button>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const { user, refreshUser } = useAuth();
   const [tab, setTab] = useState('account');
@@ -355,11 +488,13 @@ export default function SettingsPage() {
   }, [tab]);
 
   const isConfigured = id => providers.find(p => p.provider === id && p.configured === true);
+  const isSuperadmin = user?.role === 'superadmin';
 
   const tabs = [
-    { id: 'account', label: 'Account',  icon: User },
-    { id: 'ai_keys', label: 'AI Keys',  icon: Key  },
-  ];
+    { id: 'account',      label: 'Account',       icon: User,   show: true          },
+    { id: 'ai_keys',      label: 'AI Keys',        icon: Key,    show: true          },
+    { id: 'panel_config', label: 'Panel',          icon: Server, show: isSuperadmin  },
+  ].filter(t => t.show);
 
   return (
     <div className="space-y-6 max-w-2xl">
@@ -418,19 +553,16 @@ export default function SettingsPage() {
       {/* AI Keys tab */}
       {tab === 'ai_keys' && (
         <div className="card space-y-0 p-0">
-          {/* Notice banner */}
           <div className="px-5 py-3 bg-blue-500/10 border-b border-panel-700 rounded-t-lg">
             <p className="text-xs text-blue-300">
               Keys are encrypted and stored securely. They are never exposed after saving.
             </p>
           </div>
-
           <div className="px-5">
             <OpenCodeRow
               connected={!!isConfigured('opencode_account')}
               onRefresh={loadProviders}
             />
-
             {PROVIDERS.map(p => (
               <ProviderRow
                 key={p.id}
@@ -442,6 +574,9 @@ export default function SettingsPage() {
           </div>
         </div>
       )}
+
+      {/* Panel config tab — superadmin only */}
+      {tab === 'panel_config' && isSuperadmin && <PanelConfigCard />}
     </div>
   );
 }

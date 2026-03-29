@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, FileResponse
 import psutil
 
-from app.auth import require_admin, get_current_user
+from app.auth import require_admin, require_superadmin, get_current_user
 from app.cache import cache_get, cache_set, cached
 
 router = APIRouter(prefix="/api/server", tags=["server"])
@@ -314,3 +314,105 @@ async def ws_stats(websocket: WebSocket, token: str = ""):
             await asyncio.sleep(2)
     except WebSocketDisconnect:
         pass
+
+
+# ── Panel configuration (superadmin) ─────────────────────────────────────────
+
+def _env_file_path() -> str:
+    return os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")
+    )
+
+
+def _read_env_var(key: str) -> str:
+    """Read a single variable from the .env file."""
+    try:
+        with open(_env_file_path()) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(f"{key}="):
+                    return line[len(key) + 1:]
+    except FileNotFoundError:
+        pass
+    return os.getenv(key, "")
+
+
+def _write_env_var(key: str, value: str) -> None:
+    """Upsert a variable in the .env file."""
+    import re as _re
+    path = _env_file_path()
+    try:
+        with open(path) as f:
+            content = f.read()
+        new = _re.sub(rf"^{key}=.*$", f"{key}={value}", content, flags=_re.MULTILINE)
+        if new == content:
+            new += f"\n{key}={value}\n"
+        with open(path, "w") as f:
+            f.write(new)
+    except Exception as exc:
+        raise RuntimeError(f"Could not update .env: {exc}") from exc
+
+
+@router.get("/panel-config", dependencies=[Depends(require_superadmin)])
+async def get_panel_config():
+    """Return current panel-level configuration (superadmin only)."""
+    return {
+        "panel_domain": _read_env_var("PANEL_DOMAIN"),
+        "server_ip":    _read_env_var("SERVER_IP"),
+        "acme_email":   _read_env_var("ACME_EMAIL"),
+    }
+
+
+@router.patch("/panel-config", dependencies=[Depends(require_superadmin)])
+async def update_panel_config(body: dict):
+    """Update PANEL_DOMAIN (and optionally SERVER_IP / ACME_EMAIL) in .env,
+    then immediately re-sync all DNS zones to reflect the new master domain.
+    Superadmin only.
+    """
+    import app.dns_helper as _dh
+    from sqlalchemy import select as _select
+    from app.database import AsyncSessionLocal as _ASL
+    from app.models.domain import Domain as _Domain
+
+    panel_domain = (body.get("panel_domain") or "").strip().lower()
+    server_ip    = (body.get("server_ip")    or "").strip()
+    acme_email   = (body.get("acme_email")   or "").strip()
+
+    if not panel_domain:
+        from fastapi import HTTPException as _H
+        raise _H(400, "panel_domain is required")
+
+    # Persist to .env
+    _write_env_var("PANEL_DOMAIN", panel_domain)
+    if server_ip:
+        _write_env_var("SERVER_IP", server_ip)
+    if acme_email:
+        _write_env_var("ACME_EMAIL", acme_email)
+
+    # Update in-process module constants so running code uses the new value
+    # without requiring a container restart.
+    _dh.PANEL_DOMAIN = panel_domain
+    if server_ip:
+        _dh.SERVER_IP      = server_ip
+        _dh._effective_ip  = server_ip
+    if acme_email:
+        os.environ["ACME_EMAIL"] = acme_email
+
+    # Re-sync all DNS zones against the new master domain
+    ip = server_ip or _dh.get_effective_ip()
+    async with _ASL() as db:
+        result = await db.execute(_select(_Domain))
+        domains = result.scalars().all()
+
+    await _dh.sync_panel_ns_zone(ip)
+    ns_summary  = await _dh.sync_all_ns(domains, ip)
+    dns_summary = await _dh.sync_all_domains(domains, server_ip=ip)
+
+    return {
+        "ok": True,
+        "panel_domain": panel_domain,
+        "server_ip":    ip,
+        "ns_updated":   len(ns_summary.get("updated", [])),
+        "dns_provisioned": len(dns_summary.get("provisioned", [])),
+        "errors": ns_summary.get("errors", []) + dns_summary.get("errors", []),
+    }
