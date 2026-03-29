@@ -223,7 +223,8 @@ export default function BackupsPage() {
               <thead>
                 <tr className="border-b border-panel-border">
                   <th className="tbl-head">Filename</th>
-                  <th className="tbl-head">Domain</th>
+                  <th className="tbl-head">Type</th>
+                  <th className="tbl-head">Unique ID</th>
                   <th className="tbl-head">Size</th>
                   <th className="tbl-head">Created</th>
                   <th className="tbl-head text-right">Actions</th>
@@ -231,11 +232,11 @@ export default function BackupsPage() {
               </thead>
               <tbody>
                 {loadingList && (
-                  <tr><td colSpan={5} className="text-center py-8 text-ink-muted text-sm">Loading…</td></tr>
+                  <tr><td colSpan={6} className="text-center py-8 text-ink-muted text-sm">Loading…</td></tr>
                 )}
                 {!loadingList && backups.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="text-center py-10 text-ink-muted text-sm">
+                    <td colSpan={6} className="text-center py-10 text-ink-muted text-sm">
                       No backups yet for <strong className="text-ink-secondary">{selectedDomain || 'this domain'}</strong>.
                       Click <span className="text-brand-light">Create Backup</span> to make one.
                     </td>
@@ -244,14 +245,36 @@ export default function BackupsPage() {
                 {backups.map(b => (
                   <tr key={b.filename} className="border-b border-panel-border/50 hover:bg-panel-elevated transition-colors">
                     <td className="tbl-cell font-mono text-xs text-ink-secondary">{b.filename}</td>
-                    <td className="tbl-cell">{selectedDomain}</td>
+                    <td className="tbl-cell">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide
+                        ${{
+                          full:    'bg-purple-500/15 text-purple-300',
+                          website: 'bg-blue-500/15 text-blue-300',
+                          files:   'bg-teal-500/15 text-teal-300',
+                          db:      'bg-amber-500/15 text-amber-300',
+                        }[b.backup_type] || 'bg-panel-elevated text-ink-muted'}`}>
+                        {b.backup_type || '—'}
+                      </span>
+                    </td>
+                    <td className="tbl-cell">
+                      <div className="flex items-center gap-1.5">
+                        {b.verified && (
+                          <span title="Verified — recorded in panel database" className="text-ok-light flex-shrink-0">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                          </span>
+                        )}
+                        <span className="font-mono text-[10px] text-ink-muted">
+                          {b.unique_id ? b.unique_id.slice(0, 8) + '…' : <span className="text-ink-faint italic">not recorded</span>}
+                        </span>
+                      </div>
+                    </td>
                     <td className="tbl-cell">{fmtBytes(b.size)}</td>
                     <td className="tbl-cell text-ink-muted">{fmtDate(b.created)}</td>
                     <td className="tbl-cell">
                       <div className="flex items-center justify-end gap-1.5">
                         <button
                           onClick={() => handleDownload(b.filename)}
-                          className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs text-ink-muted hover:text-brand-light hover:bg-brand/10 transition-colors"
+                          className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium text-brand-light bg-brand/10 hover:bg-brand/20 transition-colors"
                           title="Download backup"
                         >
                           <Download size={12} /> Download
