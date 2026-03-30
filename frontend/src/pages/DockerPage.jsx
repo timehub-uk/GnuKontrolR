@@ -30,23 +30,26 @@ function parsePorts(raw) {
   });
 }
 
-function PortsCell({ raw }) {
+function PortsCell({ raw, serverIp }) {
   const mappings = parsePorts(raw);
   if (!mappings.length) return <span className="text-gray-600 text-xs">—</span>;
   return (
     <div className="flex flex-col gap-0.5">
-      {mappings.map((m, i) => (
-        <div key={i} className="flex items-center gap-1 text-[11px] font-mono leading-tight">
-          <span className="text-gray-500">{m.ip}</span>
-          <span className="text-gray-600">:</span>
-          <span className="text-blue-300 font-semibold">{m.host_port}</span>
-          <span className="text-gray-600 mx-0.5">→</span>
-          <span className="text-gray-400">{m.container_port}</span>
-          {m.proto && (
-            <span className="text-gray-600 text-[10px]">/{m.proto}</span>
-          )}
-        </div>
-      ))}
+      {mappings.map((m, i) => {
+        const displayIp = (m.ip === '0.0.0.0' || m.ip === '::') && serverIp ? serverIp : m.ip;
+        return (
+          <div key={i} className="flex items-center gap-1 text-[11px] font-mono leading-tight">
+            <span className="text-gray-500">{displayIp}</span>
+            <span className="text-gray-600">:</span>
+            <span className="text-blue-300 font-semibold">{m.host_port}</span>
+            <span className="text-gray-600 mx-0.5">→</span>
+            <span className="text-gray-400">{m.container_port}</span>
+            {m.proto && (
+              <span className="text-gray-600 text-[10px]">/{m.proto}</span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -167,13 +170,27 @@ export default function DockerPage() {
   const [loading,    setLoading]    = useState(true);
   const [logs,       setLogs]       = useState({ show: false, domain: '', content: '' });
   const [expanded,   setExpanded]   = useState({});   // domain → bool
+  const [serverIp,   setServerIp]   = useState('');
   const statsTimer = useRef(null);
 
   const load = async () => {
     setLoading(true);
     try {
-      const { data } = await api.get('/api/docker/containers');
-      setContainers(data);
+      const [containersRes, statsRes] = await Promise.allSettled([
+        api.get('/api/docker/containers'),
+        api.get('/api/server/stats'),
+      ]);
+      if (containersRes.status === 'fulfilled') setContainers(containersRes.value.data);
+      else setContainers([]);
+      if (statsRes.status === 'fulfilled') {
+        const s = statsRes.value.data;
+        // Prefer external IP, fall back to first internal, then first net_interface IP
+        const ip = s.external_ip
+          || s.internal_ips?.[0]
+          || Object.values(s.net_interfaces || {})[0]?.ip
+          || '';
+        setServerIp(ip);
+      }
     } catch { setContainers([]); }
     setLoading(false);
   };
@@ -296,7 +313,7 @@ export default function DockerPage() {
                   <td className="px-4 py-3 text-gray-400 font-mono text-xs">
                     {memUsed(rawName)}
                   </td>
-                  <td className="px-4 py-3"><PortsCell raw={c.Ports} /></td>
+                  <td className="px-4 py-3"><PortsCell raw={c.Ports} serverIp={serverIp} /></td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
                       <button title="Start"   onClick={() => action(rawName, 'start')}   className="text-green-500 hover:text-green-300"><Play size={13} /></button>
