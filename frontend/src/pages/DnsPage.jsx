@@ -466,6 +466,50 @@ export default function DnsPage() {
         )}
       </div>
 
+      {/* Delegation / AAAA warnings */}
+      {extLookup && selected && (() => {
+        const srv          = extLookup.server_ip;
+        const nsIps        = Object.values(extLookup.ns_ips || {}).flat();
+        const delegated    = srv && nsIps.length > 0 && nsIps.some(ip => ip === srv);
+        const aPointsHere  = srv && (extLookup.A || []).includes(srv);
+        const hasAAAA      = (extLookup.AAAA || []).length > 0;
+        if (delegated && aPointsHere && !hasAAAA) return null;
+        return (
+          <div className="space-y-1.5">
+            {!delegated && (
+              <div className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 border bg-warn/10 border-warn/25 text-warn-light text-[12px]">
+                <AlertTriangle size={14} className="shrink-0" />
+                <span className="font-semibold">Not delegated to this server</span>
+                {srv && nsIps.length > 0 && (
+                  <span className="text-ink-muted font-normal">— NS resolves to <span className="font-mono">{nsIps[0]}</span>, expected <span className="font-mono">{srv}</span>. Update glue records at your registrar.</span>
+                )}
+              </div>
+            )}
+            {!aPointsHere && srv && (extLookup.A || []).length > 0 && (
+              <div className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 border bg-bad/10 border-bad/25 text-bad-light text-[12px]">
+                <XCircle size={14} className="shrink-0" />
+                <span className="font-semibold">A record points elsewhere</span>
+                <span className="text-ink-muted font-normal">— currently <span className="font-mono">{extLookup.A[0]}</span>, expected <span className="font-mono">{srv}</span></span>
+              </div>
+            )}
+            {hasAAAA && (
+              <div className="flex items-start gap-2.5 rounded-lg px-3 py-2.5 border bg-bad/10 border-bad/25 text-bad-light text-[12px]">
+                <XCircle size={14} className="shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold">AAAA (IPv6) records exist — breaks Let's Encrypt</span>
+                  <span className="text-ink-muted font-normal ml-1">Remove at your DNS provider if this server has no IPv6.</span>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {extLookup.AAAA.map((v, i) => (
+                      <span key={i} className="font-mono text-[11px] bg-bad/15 px-1.5 py-0.5 rounded">{v}</span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* SOA panel */}
       {rawRrsets.length > 0 && (
         <SoaPanel zone={selected} rrsets={rawRrsets} onRefresh={() => loadRecords(selected)} />
@@ -569,88 +613,21 @@ export default function DnsPage() {
         ) : extLookup ? (
           <div className="space-y-4">
 
-            {/* ── Delegation status banner ── */}
+            {/* DNS provider badge */}
             {(() => {
-              const srv = extLookup.server_ip;
-              const nsIps = Object.values(extLookup.ns_ips || {}).flat();
-              const delegated = srv && nsIps.length > 0 && nsIps.some(ip => ip === srv);
-              const hasAAAA   = (extLookup.AAAA || []).length > 0;
-              const aPointsHere = srv && (extLookup.A || []).includes(srv);
-              const provider  = detectDnsProvider(extLookup.NS);
-
-              return (
-                <div className="space-y-2">
-                  {/* Delegation row */}
-                  <div className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 border text-[12px] ${
-                    delegated
-                      ? 'bg-ok/10 border-ok/25 text-ok-light'
-                      : 'bg-warn/10 border-warn/25 text-warn-light'
-                  }`}>
-                    {delegated
-                      ? <CheckCircle size={14} className="shrink-0" />
-                      : <AlertTriangle size={14} className="shrink-0" />}
-                    <span className="font-semibold">
-                      {delegated ? 'Delegated to this server' : 'Not yet delegated to this server'}
-                    </span>
-                    {!delegated && srv && (
-                      <span className="text-ink-muted font-normal ml-1">
-                        — NS servers resolve to {nsIps[0] || '?'}, expected {srv}. Update glue records at your registrar.
-                      </span>
-                    )}
-                  </div>
-
-                  {/* A record points here */}
-                  {srv && (
-                    <div className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 border text-[12px] ${
-                      aPointsHere
-                        ? 'bg-ok/10 border-ok/25 text-ok-light'
-                        : 'bg-bad/10 border-bad/25 text-bad-light'
-                    }`}>
-                      {aPointsHere ? <CheckCircle size={14} className="shrink-0" /> : <XCircle size={14} className="shrink-0" />}
-                      <span className="font-semibold">
-                        {aPointsHere ? 'A record points to this server' : 'A record points elsewhere'}
-                      </span>
-                      {!aPointsHere && extLookup.A?.length > 0 && (
-                        <span className="text-ink-muted font-normal ml-1 font-mono">
-                          — currently {extLookup.A[0]}, expected {srv}
-                        </span>
-                      )}
-                    </div>
-                  )}
-
-                  {/* AAAA warning */}
-                  {hasAAAA && (
-                    <div className="flex items-start gap-2.5 rounded-lg px-3 py-2.5 border bg-bad/10 border-bad/25 text-bad-light text-[12px]">
-                      <XCircle size={14} className="shrink-0 mt-0.5" />
-                      <div>
-                        <span className="font-semibold">IPv6 (AAAA) records exist — will break Let's Encrypt</span>
-                        <span className="text-ink-muted font-normal ml-1">
-                          — LE validates via IPv6 first. Remove these AAAA records at your DNS provider if this server has no IPv6.
-                        </span>
-                        <div className="flex flex-wrap gap-1 mt-1">
-                          {extLookup.AAAA.map((v, i) => (
-                            <span key={i} className="font-mono text-[11px] bg-bad/15 px-1.5 py-0.5 rounded">{v}</span>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* DNS provider badge */}
-                  {provider && (
-                    <div className="flex items-center gap-2 text-[12px] text-ink-secondary bg-panel-elevated/60 rounded-lg px-3 py-2 border border-panel-border w-fit">
-                      <Server size={12} className="text-brand shrink-0" />
-                      <span>DNS hosted by <span className="font-semibold text-ink-primary">{provider.name}</span></span>
-                      {provider.url && (
-                        <a href={provider.url} target="_blank" rel="noopener noreferrer"
-                          className="text-brand-light hover:text-brand ml-1 flex items-center gap-0.5">
-                          <ExternalLink size={11} /> Visit
-                        </a>
-                      )}
-                    </div>
+              const provider = detectDnsProvider(extLookup.NS);
+              return provider ? (
+                <div className="flex items-center gap-2 text-[12px] text-ink-secondary bg-panel-elevated/60 rounded-lg px-3 py-2 border border-panel-border w-fit">
+                  <Server size={12} className="text-brand shrink-0" />
+                  <span>DNS hosted by <span className="font-semibold text-ink-primary">{provider.name}</span></span>
+                  {provider.url && (
+                    <a href={provider.url} target="_blank" rel="noopener noreferrer"
+                      className="text-brand-light hover:text-brand ml-1 flex items-center gap-0.5">
+                      <ExternalLink size={11} /> Visit
+                    </a>
                   )}
                 </div>
-              );
+              ) : null;
             })()}
 
             {/* ── Record columns ── */}
