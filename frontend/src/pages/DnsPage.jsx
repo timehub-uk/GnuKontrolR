@@ -284,7 +284,10 @@ export default function DnsPage() {
       const rrsets = data?.rrsets || data?.records || [];
       setRawRrsets(rrsets);
       setRecords(parseRrsets(rrsets));
-      setZoneKind(data?.kind || null);
+      // Normalise legacy Master/Slave names from older PowerDNS responses
+      const kindMap = { Master: 'Primary', Slave: 'Secondary' };
+      const rawKind = data?.kind || null;
+      setZoneKind(kindMap[rawKind] ?? rawKind);
     } catch (e) {
       toastError(e?.response?.data?.detail || 'Failed to load DNS records');
       setRecords([]);
@@ -448,7 +451,7 @@ export default function DnsPage() {
             <span className="text-[11px] text-ink-muted flex items-center gap-1">
               <ArrowLeftRight size={11} /> Zone mode:
             </span>
-            {['Native', 'Master', 'Slave'].map(k => (
+            {['Native', 'Primary', 'Secondary'].map(k => (
               <button
                 key={k}
                 onClick={() => handleSwitchKind(k)}

@@ -210,9 +210,13 @@ async def external_lookup(domain: str, user=Depends(get_current_user)):
 @router.patch("/zones/{zone}/kind")
 async def set_zone_kind(zone: str, req: ZoneKindRequest, user=Depends(require_admin)):
     """Switch a zone between Native / Master / Slave."""
-    allowed = {"Native", "Master", "Slave"}
-    if req.kind not in allowed:
+    # PowerDNS 4.5+ uses Primary/Secondary; accept old names and normalise
+    _alias = {"Master": "Primary", "Slave": "Secondary"}
+    kind = _alias.get(req.kind, req.kind)
+    allowed = {"Native", "Primary", "Secondary"}
+    if kind not in allowed:
         raise HTTPException(400, f"kind must be one of {allowed}")
+    req = ZoneKindRequest(kind=kind)
     zone_id = zone if zone.endswith(".") else zone + "."
     try:
         return await pdns_patch(f"/zones/{zone_id}", {"kind": req.kind})
