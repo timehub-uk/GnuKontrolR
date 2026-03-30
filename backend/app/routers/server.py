@@ -87,6 +87,17 @@ def _collect_stats() -> dict:
                 except ValueError:
                     pass
 
+    # Per-interface IO counters — exclude loopback
+    net_per_nic = psutil.net_io_counters(pernic=True)
+    net_interfaces = {
+        iface: {
+            "sent_mb": counters.bytes_sent // (1024 * 1024),
+            "recv_mb": counters.bytes_recv // (1024 * 1024),
+        }
+        for iface, counters in net_per_nic.items()
+        if not iface.startswith("lo")
+    }
+
     return {
         "cpu_percent":    cpu,
         "mem_total_mb":   mem.total  // (1024 * 1024),
@@ -100,6 +111,7 @@ def _collect_stats() -> dict:
         "boot_timestamp": int(psutil.boot_time()),
         "internal_ips":   internal_ips,
         "external_ip":    external_ip,
+        "net_interfaces": net_interfaces,
     }
 
 

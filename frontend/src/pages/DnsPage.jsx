@@ -3,7 +3,7 @@ import api from '../utils/api';
 import { toastSuccess, toastError } from '../utils/toast';
 import {
   Globe, Plus, Trash2, RefreshCw, AlertTriangle, Loader,
-  ShieldCheck, Search, Server, ArrowLeftRight,
+  ShieldCheck, Search, Server, ArrowLeftRight, Hash,
 } from 'lucide-react';
 
 const DNS_PORTS = [
@@ -44,10 +44,195 @@ function SubdomainPill() {
   );
 }
 
+const DNS_PROVIDERS = [
+  { pattern: /\.cloudflare\.com$/i,     name: 'Cloudflare',         url: 'https://www.cloudflare.com/dns/' },
+  { pattern: /\.ns\.cloudflare\.com$/i, name: 'Cloudflare',         url: 'https://www.cloudflare.com/dns/' },
+  { pattern: /awsdns/i,                 name: 'Amazon Route 53',    url: 'https://aws.amazon.com/route53/' },
+  { pattern: /\.googledomains\.com$/i,  name: 'Google Domains DNS', url: 'https://domains.google/' },
+  { pattern: /dns\.google$/i,           name: 'Google Public DNS',  url: 'https://developers.google.com/speed/public-dns' },
+  { pattern: /\.akam\.net$/i,           name: 'Akamai',             url: 'https://www.akamai.com/solutions/security/dns' },
+  { pattern: /\.ultradns\./i,           name: 'UltraDNS',           url: 'https://vercara.com/ultradns' },
+  { pattern: /\.dynect\.net$/i,         name: 'Dyn DNS',            url: 'https://help.dyn.com/' },
+  { pattern: /\.registrar-servers\.com$/i, name: 'Namecheap',       url: 'https://www.namecheap.com/' },
+  { pattern: /\.domaincontrol\.com$/i,  name: 'GoDaddy',            url: 'https://www.godaddy.com/' },
+  { pattern: /\.name-services\.com$/i,  name: 'enom / Tucows',      url: 'https://www.enom.com/' },
+  { pattern: /\.digitalocean\.com$/i,   name: 'DigitalOcean DNS',   url: 'https://www.digitalocean.com/products/dns' },
+  { pattern: /\.linode\.com$/i,         name: 'Linode / Akamai',    url: 'https://www.linode.com/docs/products/networking/dns-manager/' },
+  { pattern: /\.hetzner\.com$/i,        name: 'Hetzner DNS',        url: 'https://www.hetzner.com/dns-console' },
+  { pattern: /\.ovh\.net$/i,            name: 'OVH',                url: 'https://www.ovhcloud.com/en/domains/dns-anycast/' },
+  { pattern: /\.vultr\.com$/i,          name: 'Vultr DNS',          url: 'https://www.vultr.com/docs/introduction-to-vultr-dns/' },
+];
+
+function detectDnsProvider(nsRecords) {
+  if (!nsRecords?.length) return null;
+  for (const ns of nsRecords) {
+    for (const p of DNS_PROVIDERS) {
+      if (p.pattern.test(ns)) return p;
+    }
+  }
+  // Generic: extract domain from first NS
+  try {
+    const parts = nsRecords[0].split('.');
+    if (parts.length >= 2) {
+      const apex = parts.slice(-2).join('.');
+      return { name: apex, url: null };
+    }
+  } catch {}
+  return null;
+}
+
+function parseSoa(content) {
+  if (!content) return null;
+  const p = content.split(/\s+/);
+  if (p.length < 7) return null;
+  return {
+    primary_ns: p[0].replace(/\.$/, ''),
+    email:      p[1].replace(/\.$/, '').replace(/^(\S+?)\./, '$1@'),
+    serial:     p[2],
+    refresh:    p[3],
+    retry:      p[4],
+    expire:     p[5],
+    minimum:    p[6],
+  };
+}
+
+function SoaPanel({ zone, rrsets, onRefresh }) {
+  const soaRr  = rrsets?.find(r => r.type === 'SOA');
+  const soaRaw = soaRr?.records?.[0]?.content || '';
+  const soa    = parseSoa(soaRaw);
+
+  const [editing,  setEditing]  = useState(false);
+  const [bumping,  setBumping]  = useState(false);
+  const [form,     setForm]     = useState({});
+
+  useEffect(() => {
+    if (soa) setForm({ ...soa });
+  }, [soaRaw]);
+
+  if (!soa) return null;
+
+  const bump = async () => {
+    if (!zone) return;
+    setBumping(true);
+    try {
+      const { data } = await api.patch(`/api/dns/zones/${zone}/soa`, { serial: 0 });
+      toastSuccess(`Serial bumped → ${data.serial}`);
+      onRefresh();
+    } catch (e) {
+      toastError(e?.response?.data?.detail || 'Failed to bump serial');
+    } finally {
+      setBumping(false);
+    }
+  };
+
+  const save = async () => {
+    if (!zone) return;
+    setBumping(true);
+    try {
+      // Convert email back to DNS format: user@domain → user.domain.
+      const emailDns = form.email.includes('@')
+        ? form.email.replace('@', '.') + '.'
+        : form.email;
+      await api.patch(`/api/dns/zones/${zone}/soa`, {
+        primary_ns: form.primary_ns,
+        email:      emailDns,
+        serial:     parseInt(form.serial) || 0,
+        refresh:    parseInt(form.refresh),
+        retry:      parseInt(form.retry),
+        expire:     parseInt(form.expire),
+        minimum:    parseInt(form.minimum),
+      });
+      toastSuccess('SOA record updated');
+      setEditing(false);
+      onRefresh();
+    } catch (e) {
+      toastError(e?.response?.data?.detail || 'Failed to update SOA');
+    } finally {
+      setBumping(false);
+    }
+  };
+
+  const f = (label, key, mono = false) => (
+    <div>
+      <label className="block text-[10px] text-ink-faint uppercase tracking-wide mb-1">{label}</label>
+      <input
+        className={`input w-full text-xs ${mono ? 'font-mono' : ''}`}
+        value={form[key] || ''}
+        onChange={e => setForm(x => ({ ...x, [key]: e.target.value }))}
+      />
+    </div>
+  );
+
+  return (
+    <div className="panel p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-[13px] font-semibold text-ink-primary flex items-center gap-2">
+          <Hash size={14} className="text-brand" /> SOA Record
+          <span className="text-[11px] font-normal text-ink-muted">(Start of Authority)</span>
+        </h2>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={bump}
+            disabled={bumping}
+            className="btn-ghost text-xs py-1 px-2.5 flex items-center gap-1 disabled:opacity-50"
+            title="Increment serial by 1"
+          >
+            {bumping ? <Loader size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+            Bump Serial
+          </button>
+          <button
+            onClick={() => setEditing(e => !e)}
+            className="btn-ghost text-xs py-1 px-2.5"
+          >
+            {editing ? 'Cancel' : 'Edit'}
+          </button>
+        </div>
+      </div>
+
+      {!editing ? (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {[
+            { label: 'Serial',      val: soa.serial,     highlight: true },
+            { label: 'Primary NS',  val: soa.primary_ns, mono: true },
+            { label: 'Hostmaster',  val: soa.email },
+            { label: 'Refresh',     val: `${soa.refresh}s` },
+            { label: 'Retry',       val: `${soa.retry}s` },
+            { label: 'Expire',      val: `${soa.expire}s` },
+            { label: 'Min TTL',     val: `${soa.minimum}s` },
+          ].map(({ label, val, highlight, mono }) => (
+            <div key={label} className={`rounded-lg p-2.5 ${highlight ? 'bg-brand/10 border border-brand/25' : 'bg-panel-elevated'}`}>
+              <p className="text-[10px] text-ink-faint uppercase tracking-wide">{label}</p>
+              <p className={`text-sm mt-0.5 ${highlight ? 'text-brand-light font-bold font-mono' : mono ? 'font-mono text-ink-primary text-xs' : 'text-ink-primary'}`}>
+                {val}
+              </p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            {f('Primary NS', 'primary_ns', true)}
+            {f('Hostmaster Email', 'email')}
+            {f('Serial', 'serial', true)}
+            {f('Refresh (s)', 'refresh', true)}
+            {f('Retry (s)', 'retry', true)}
+            {f('Expire (s)', 'expire', true)}
+            {f('Min TTL (s)', 'minimum', true)}
+          </div>
+          <button onClick={save} disabled={bumping} className="btn-primary text-xs px-3 py-1.5 disabled:opacity-50">
+            {bumping ? 'Saving…' : 'Save SOA'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DnsPage() {
   const [domains,   setDomains]   = useState([]);
   const [selected,  setSelected]  = useState('');
   const [records,   setRecords]   = useState([]);
+  const [rawRrsets, setRawRrsets] = useState([]);
   const [dnsState,  setDnsState]  = useState(null);
   const [loading,   setLoading]   = useState(false);
   const [ensuring,  setEnsuring]  = useState(false);
@@ -96,6 +281,7 @@ export default function DnsPage() {
     try {
       const { data } = await api.get(`/api/dns/zones/${z}`);
       const rrsets = data?.rrsets || data?.records || [];
+      setRawRrsets(rrsets);
       setRecords(parseRrsets(rrsets));
       setZoneKind(data?.kind || null);
     } catch (e) {
@@ -230,7 +416,7 @@ export default function DnsPage() {
         <select
           className="input w-56"
           value={selected}
-          onChange={e => { setSelected(e.target.value); setRecords([]); setExtLookup(null); setZoneKind(null); }}
+          onChange={e => { setSelected(e.target.value); setRecords([]); setRawRrsets([]); setExtLookup(null); setZoneKind(null); }}
         >
           {domains.length === 0 && <option value="">No domains</option>}
           {domains.map(d => {
@@ -278,6 +464,11 @@ export default function DnsPage() {
           </div>
         )}
       </div>
+
+      {/* SOA panel */}
+      {rawRrsets.length > 0 && (
+        <SoaPanel zone={selected} rrsets={rawRrsets} onRefresh={() => loadRecords(selected)} />
+      )}
 
       {/* Add record form */}
       <div className="panel p-4">
@@ -375,36 +566,85 @@ export default function DnsPage() {
             <Loader size={16} className="animate-spin inline mr-2" />Querying public DNS…
           </div>
         ) : extLookup ? (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* A records */}
-            <div>
-              <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-ok" /> A — IP Address
-              </p>
-              {extLookup.A?.length ? extLookup.A.map((v, i) => (
-                <p key={i} className="font-mono text-xs text-ink-primary bg-panel-elevated px-2 py-1 rounded mb-1">{v}</p>
-              )) : <p className="text-xs text-ink-muted">No A record found</p>}
+          <div className="space-y-4">
+            {(() => {
+              const provider = detectDnsProvider(extLookup.NS);
+              return provider ? (
+                <div className="flex items-center gap-2 text-[12px] text-ink-secondary bg-panel-elevated/60 rounded-lg px-3 py-2 border border-panel-border w-fit">
+                  <Server size={12} className="text-brand shrink-0" />
+                  <span>DNS hosted by <span className="font-semibold text-ink-primary">{provider.name}</span></span>
+                  {provider.url && (
+                    <a
+                      href={provider.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-brand-light underline underline-offset-2 hover:text-brand ml-1"
+                    >
+                      ↗ Visit
+                    </a>
+                  )}
+                </div>
+              ) : null;
+            })()}
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* A records */}
+              <div>
+                <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-ok" /> A — IP Address
+                </p>
+                {extLookup.A?.length ? extLookup.A.map((v, i) => (
+                  <p key={i} className="font-mono text-xs text-ink-primary bg-panel-elevated px-2 py-1 rounded mb-1">{v}</p>
+                )) : <p className="text-xs text-ink-muted">No A record found</p>}
+              </div>
+
+              {/* NS records */}
+              <div>
+                <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                  <Server size={11} /> NS — DNS Hosting
+                </p>
+                {extLookup.NS?.length ? extLookup.NS.map((v, i) => (
+                  <p key={i} className="font-mono text-xs text-ink-primary bg-panel-elevated px-2 py-1 rounded mb-1">{v}</p>
+                )) : <p className="text-xs text-ink-muted">No NS records found</p>}
+              </div>
+
+              {/* MX records */}
+              <div>
+                <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                  <Globe size={11} /> MX — Mail Hosting
+                </p>
+                {extLookup.MX?.length ? extLookup.MX.map((v, i) => (
+                  <p key={i} className="font-mono text-xs text-ink-primary bg-panel-elevated px-2 py-1 rounded mb-1">{v}</p>
+                )) : <p className="text-xs text-ink-muted">No MX records found</p>}
+              </div>
             </div>
 
-            {/* NS records — who hosts DNS */}
-            <div>
-              <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
-                <Server size={11} /> NS — DNS Hosting
-              </p>
-              {extLookup.NS?.length ? extLookup.NS.map((v, i) => (
-                <p key={i} className="font-mono text-xs text-ink-primary bg-panel-elevated px-2 py-1 rounded mb-1">{v}</p>
-              )) : <p className="text-xs text-ink-muted">No NS records found</p>}
-            </div>
-
-            {/* MX records */}
-            <div>
-              <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
-                <Globe size={11} /> MX — Mail Hosting
-              </p>
-              {extLookup.MX?.length ? extLookup.MX.map((v, i) => (
-                <p key={i} className="font-mono text-xs text-ink-primary bg-panel-elevated px-2 py-1 rounded mb-1">{v}</p>
-              )) : <p className="text-xs text-ink-muted">No MX records found</p>}
-            </div>
+            {/* SOA */}
+            {extLookup.SOA && (
+              <div>
+                <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                  <Hash size={11} /> SOA — External Authority (via 8.8.8.8)
+                </p>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  {[
+                    { label: 'Serial',     val: extLookup.SOA.serial,     highlight: true },
+                    { label: 'Primary NS', val: extLookup.SOA.primary_ns, mono: true },
+                    { label: 'Hostmaster', val: extLookup.SOA.email },
+                    { label: 'Refresh',    val: `${extLookup.SOA.refresh}s` },
+                    { label: 'Retry',      val: `${extLookup.SOA.retry}s` },
+                    { label: 'Expire',     val: `${extLookup.SOA.expire}s` },
+                    { label: 'Min TTL',    val: `${extLookup.SOA.minimum}s` },
+                  ].map(({ label, val, highlight, mono }) => (
+                    <div key={label} className={`rounded-lg p-2 ${highlight ? 'bg-brand/10 border border-brand/25' : 'bg-panel-elevated'}`}>
+                      <p className="text-[10px] text-ink-faint uppercase tracking-wide">{label}</p>
+                      <p className={`text-xs mt-0.5 ${highlight ? 'text-brand-light font-bold font-mono' : mono ? 'font-mono text-ink-primary' : 'text-ink-primary'}`}>
+                        {val}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <p className="text-xs text-ink-muted">Select a domain to view external DNS results.</p>
