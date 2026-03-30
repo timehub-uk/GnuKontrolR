@@ -281,6 +281,7 @@ export default function DnsPage() {
   const [form, setForm] = useState({ type: 'A', name: '', content: '', ttl: 300 });
   const [editRecord, setEditRecord] = useState(null);   // { origName, origType, type, name, content, ttl }
   const [editSaving, setEditSaving] = useState(false);
+  const [pollMinutes, setPollMinutes] = useState(3);
 
   // External DNS lookup state
   const [extLookup, setExtLookup] = useState(null);
@@ -302,6 +303,11 @@ export default function DnsPage() {
     api.get('/api/server/services').then(r => {
       setDnsState(r.data?.powerdns ?? 'unknown');
     }).catch(() => setDnsState('unknown'));
+
+    api.get('/api/dns/poll-interval').then(r => {
+      const secs = r.data?.interval_seconds || 180;
+      setPollMinutes(Math.ceil(secs / 60));
+    }).catch(() => {});
   }, []);
 
   // Flatten PowerDNS rrsets into display rows
@@ -436,7 +442,7 @@ export default function DnsPage() {
         content: editRecord.content,
         ttl:     editRecord.ttl,
       });
-      toastSuccess('Record updated');
+      toastSuccess(`DNS edit applied — will be published in ~${pollMinutes} min`);
       setEditRecord(null);
       await loadRecords(selected);
     } catch (e) {

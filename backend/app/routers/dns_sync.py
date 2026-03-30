@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import require_superadmin
+from app.auth import require_superadmin, get_current_user
 from app.database import AsyncSessionLocal, get_db
 from app.dns_helper import (
     rotate_dkim_key, sync_all_domains, sync_all_ns,
@@ -43,7 +43,10 @@ async def run_dns_sync() -> dict:
     return summary
 
 
-async def dns_sync_loop(interval: int = 180) -> None:
+DNS_SYNC_INTERVAL_SECONDS: int = 180   # exposed via /api/dns/poll-interval
+
+
+async def dns_sync_loop(interval: int = DNS_SYNC_INTERVAL_SECONDS) -> None:
     """Background task: sync DNS every *interval* seconds."""
     while True:
         try:
@@ -330,6 +333,12 @@ async def test_dns_connectivity():
 async def trigger_dns_sync():
     """Manually trigger a full DNS sync (superadmin only)."""
     return await run_dns_sync()
+
+
+@router.get("/poll-interval", dependencies=[Depends(get_current_user)])
+async def get_poll_interval():
+    """Return the DNS background sync interval (any authenticated user)."""
+    return {"interval_seconds": DNS_SYNC_INTERVAL_SECONDS}
 
 
 @router.get("/sync", dependencies=[Depends(require_superadmin)])
