@@ -36,8 +36,14 @@ acme.json
 *.swo
 Thumbs.db
 
-# AI / Claude generated files — never publish
+# AI / Claude / Superpowers — never publish
 docs/superpowers/
+.superpowers/
+.plugin-config/
+.claude-dev-helper/
+**/.superpowers/
+**/.plugin-config/
+**/.claude-dev-helper/
 .complexity-log.md
 .session-summary.md
 .project-structure.md
