@@ -36,6 +36,16 @@ acme.json
 *.swo
 Thumbs.db
 
+# Internal/working docs — never publish
+review.md
+flow.md
+flows.md
+Flows.md
+bad.md
+files.md
+status.md
+docs/
+
 # AI / Claude / Superpowers — never publish
 docs/superpowers/
 .superpowers/
