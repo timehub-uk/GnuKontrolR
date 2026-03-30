@@ -29,6 +29,132 @@ CONTAINER_SERVICES = {
 # Thread pool for blocking psutil / subprocess calls
 _pool = ThreadPoolExecutor(max_workers=4)
 
+# Compact OUI → manufacturer table (first 3 MAC bytes, uppercase no-colon)
+_OUI: dict[str, str] = {
+    "000C29": "VMware", "000569": "VMware", "005056": "VMware",
+    "0050BA": "VMware", "001C14": "VMware",
+    "08002B": "DEC", "080027": "VirtualBox (Oracle)",
+    "525400": "QEMU/KVM", "001A4A": "QEMU",
+    "DC:A6:32": "Raspberry Pi",  # normalised below
+    "B827EB": "Raspberry Pi", "E45F01": "Raspberry Pi", "DCA632": "Raspberry Pi",
+    "000000": "Xerox",
+    "001090": "Broadcom", "000AF7": "Broadcom",
+    "A4C361": "Intel",   "8C8D28": "Intel",   "048D38": "Intel",
+    "F8E43B": "Intel",   "3C970E": "Intel",   "A45E60": "Intel",
+    "002128": "Intel",   "001BFC": "Intel",   "001CC0": "Intel",
+    "88D7F6": "Intel",   "6C2E85": "Intel",
+    "000E35": "Cisco",   "000BFD": "Cisco",   "0012DA": "Cisco",
+    "001B0D": "Cisco",   "001C58": "Cisco",   "001D45": "Cisco",
+    "001E14": "Cisco",   "001F27": "Cisco",   "002155": "Cisco",
+    "FCFBFB": "Cisco",   "3C0E23": "Cisco",
+    "00163E": "Xen",     "000D3A": "Microsoft Azure", "001DD8": "Microsoft",
+    "001BFC": "Microsoft", "7C1E52": "Microsoft",
+    "0026B9": "Dell",    "14FEB5": "Dell",    "D4AE52": "Dell",
+    "F48E38": "Dell",    "18A994": "Dell",    "B083FE": "Dell",
+    "3417EB": "Dell",    "A4BADB": "Dell",
+    "0050BA": "HP",      "3C4A92": "HP",      "9CB6D0": "HP",
+    "001A4B": "HP",      "001B78": "HP",      "2C44FD": "HP",
+    "D8D385": "HP",      "9CBF0D": "Hewlett Packard",
+    "BC5FF4": "Supermicro", "AC1F6B": "Supermicro", "0025B5": "Cisco UCS",
+    "C8D3FF": "Realtek", "E04F43": "Realtek", "00E04C": "Realtek",
+    "80FA5B": "Realtek",
+    "001A11": "Google",  "F4F5E8": "Google",  "3C5AB4": "Google",
+    "A4773D": "Amazon",  "0EC90B": "Amazon",
+    "F2B437": "Amazon AWS", "02E9C8": "Amazon ENI",
+    "000D60": "IBM",     "00055D": "IBM",
+    "0003FF": "Microsoft Hyper-V", "00155D": "Microsoft Hyper-V",
+}
+
+def _oui_lookup(mac: str) -> str:
+    """Return manufacturer name for a MAC address, or empty string."""
+    if not mac:
+        return ""
+    oui = mac.upper().replace(":", "").replace("-", "")[:6]
+    return _OUI.get(oui, "")
+
+
+def _get_gateways() -> dict[str, str]:
+    """Parse /proc/net/route to get per-interface default gateways."""
+    import struct
+    gateways: dict[str, str] = {}
+    try:
+        with open("/proc/net/route") as f:
+            for line in f.readlines()[1:]:
+                parts = line.strip().split()
+                if len(parts) < 4:
+                    continue
+                iface, dest, gw_hex = parts[0], parts[1], parts[2]
+                if dest == "00000000":   # default route
+                    gw = socket.inet_ntoa(bytes.fromhex(gw_hex.zfill(8))[::-1])
+                    gateways[iface] = gw
+    except Exception:
+        pass
+    return gateways
+
+
+def _get_driver(iface: str) -> str:
+    """Read driver name from /sys/class/net/{iface}/device/driver symlink."""
+    try:
+        link = os.readlink(f"/sys/class/net/{iface}/device/driver")
+        return os.path.basename(link)
+    except Exception:
+        return ""
+
+
+def _collect_interfaces() -> dict:
+    """Collect rich per-interface data: IP, mask, gateway, MAC, driver, manufacturer."""
+    import ipaddress as _ip
+    _DOCKER_RANGES = [
+        _ip.ip_network("172.16.0.0/12"),
+        _ip.ip_network("10.0.0.0/8"),
+    ]
+
+    addrs   = psutil.net_if_addrs()
+    stats   = psutil.net_if_stats()
+    io_nic  = psutil.net_io_counters(pernic=True)
+    gateways = _get_gateways()
+
+    result: dict = {}
+    for iface, addr_list in addrs.items():
+        if iface.startswith("lo"):
+            continue
+
+        ipv4 = mask = mac = None
+        for a in addr_list:
+            if a.family == socket.AF_INET and not ipv4:
+                ipv4 = a.address
+                mask = a.netmask
+            elif a.family == socket.AF_PACKET and not mac:   # Linux only
+                mac = a.address
+
+        # Skip pure Docker bridge interfaces unless they have a real gateway
+        if ipv4:
+            try:
+                addr_obj = _ip.ip_address(ipv4)
+                if any(addr_obj in r for r in _DOCKER_RANGES) and iface not in gateways:
+                    continue
+            except ValueError:
+                pass
+
+        io = io_nic.get(iface)
+        iface_stats = stats.get(iface)
+        driver = _get_driver(iface)
+        manufacturer = _oui_lookup(mac or "")
+
+        result[iface] = {
+            "ip":           ipv4 or "",
+            "mask":         mask or "",
+            "gateway":      gateways.get(iface, ""),
+            "mac":          mac or "",
+            "manufacturer": manufacturer,
+            "driver":       driver,
+            "sent_mb":      io.bytes_sent // (1024 * 1024) if io else 0,
+            "recv_mb":      io.bytes_recv // (1024 * 1024) if io else 0,
+            "speed_mbps":   iface_stats.speed if iface_stats else 0,
+            "is_up":        iface_stats.isup if iface_stats else False,
+        }
+    return result
+
 
 def _container_state(container_name: str) -> str:
     """Return Docker container state: running → active, exited → inactive, etc."""
@@ -87,17 +213,6 @@ def _collect_stats() -> dict:
                 except ValueError:
                     pass
 
-    # Per-interface IO counters — exclude loopback
-    net_per_nic = psutil.net_io_counters(pernic=True)
-    net_interfaces = {
-        iface: {
-            "sent_mb": counters.bytes_sent // (1024 * 1024),
-            "recv_mb": counters.bytes_recv // (1024 * 1024),
-        }
-        for iface, counters in net_per_nic.items()
-        if not iface.startswith("lo")
-    }
-
     return {
         "cpu_percent":    cpu,
         "mem_total_mb":   mem.total  // (1024 * 1024),
@@ -111,7 +226,7 @@ def _collect_stats() -> dict:
         "boot_timestamp": int(psutil.boot_time()),
         "internal_ips":   internal_ips,
         "external_ip":    external_ip,
-        "net_interfaces": net_interfaces,
+        "net_interfaces": _collect_interfaces(),
     }
 
 

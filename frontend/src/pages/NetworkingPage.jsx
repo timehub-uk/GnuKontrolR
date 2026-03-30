@@ -706,13 +706,60 @@ export default function NetworkingPage() {
 
                 <Card icon={Wifi} title="Network Interfaces">
                   {Object.entries(netIf).length > 0 ? (
-                    <div className="space-y-2">
-                      {Object.entries(netIf).slice(0, 6).map(([iface, n]) => (
-                        <div key={iface} className="flex items-center justify-between bg-panel-elevated/50 rounded-lg px-3 py-2">
-                          <span className="text-[12px] font-mono text-ink-secondary">{iface}</span>
-                          <div className="flex items-center gap-3 text-[11px] text-ink-muted">
-                            <span className="flex items-center gap-0.5"><ArrowUp size={10} className="text-ok" />{n.sent_mb}MB</span>
-                            <span className="flex items-center gap-0.5"><ArrowDown size={10} className="text-brand" />{n.recv_mb}MB</span>
+                    <div className="space-y-3">
+                      {Object.entries(netIf).map(([iface, n]) => (
+                        <div key={iface} className="rounded-xl border border-panel-border bg-panel-elevated/40 overflow-hidden">
+                          {/* Interface header */}
+                          <div className="flex items-center justify-between px-3 py-2 bg-panel-elevated/60 border-b border-panel-border">
+                            <div className="flex items-center gap-2">
+                              <span className={`w-2 h-2 rounded-full ${n.is_up ? 'bg-ok' : 'bg-bad'}`} />
+                              <span className="text-[13px] font-mono font-semibold text-ink-primary">{iface}</span>
+                              {n.driver && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-panel-subtle border border-panel-border text-ink-muted font-mono">
+                                  {n.driver}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-3 text-[11px] text-ink-muted">
+                              {n.speed_mbps > 0 && (
+                                <span className="text-ink-faint">{n.speed_mbps} Mbps</span>
+                              )}
+                              <span className="flex items-center gap-0.5"><ArrowUp size={10} className="text-ok" />{n.sent_mb} MB</span>
+                              <span className="flex items-center gap-0.5"><ArrowDown size={10} className="text-brand" />{n.recv_mb} MB</span>
+                            </div>
+                          </div>
+                          {/* Interface details grid */}
+                          <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1.5 px-3 py-2.5">
+                            {n.ip && (
+                              <div>
+                                <p className="text-[9px] uppercase tracking-wide text-ink-faint">IP Address</p>
+                                <p className="text-[12px] font-mono text-ink-primary">{n.ip}</p>
+                              </div>
+                            )}
+                            {n.mask && (
+                              <div>
+                                <p className="text-[9px] uppercase tracking-wide text-ink-faint">Subnet Mask</p>
+                                <p className="text-[12px] font-mono text-ink-secondary">{n.mask}</p>
+                              </div>
+                            )}
+                            {n.gateway && (
+                              <div>
+                                <p className="text-[9px] uppercase tracking-wide text-ink-faint">Gateway</p>
+                                <p className="text-[12px] font-mono text-ink-secondary">{n.gateway}</p>
+                              </div>
+                            )}
+                            {n.mac && (
+                              <div>
+                                <p className="text-[9px] uppercase tracking-wide text-ink-faint">MAC Address</p>
+                                <p className="text-[12px] font-mono text-ink-secondary">{n.mac}</p>
+                              </div>
+                            )}
+                            {n.manufacturer && (
+                              <div>
+                                <p className="text-[9px] uppercase tracking-wide text-ink-faint">Manufacturer</p>
+                                <p className="text-[12px] text-ink-secondary">{n.manufacturer}</p>
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))}
