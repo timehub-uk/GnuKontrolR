@@ -131,47 +131,58 @@ async def create_zone(zone: str, user=Depends(require_admin)):
         raise HTTPException(502, f"PowerDNS error: {e}")
 
 
-async def _dig(domain: str, record_type: str) -> list[str]:
-    """Run a dig query against 8.8.8.8, return list of answer strings."""
+_DNS_RESOLVER = None
+
+def _get_resolver():
+    """Return a cached dnspython resolver pointed at 8.8.8.8."""
+    global _DNS_RESOLVER
+    if _DNS_RESOLVER is None:
+        import dns.resolver as _r
+        res = _r.Resolver(configure=False)
+        res.nameservers = ["8.8.8.8", "8.8.4.4"]
+        res.timeout = 4
+        res.lifetime = 8
+        _DNS_RESOLVER = res
+    return _DNS_RESOLVER
+
+
+def _dns_query(domain: str, rtype: str) -> list[str]:
+    """Blocking DNS query via dnspython → list of string answers."""
+    import dns.resolver, dns.exception
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "dig", "+short", "+time=3", "+tries=2",
-            domain, record_type, "@8.8.8.8",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
-        lines = [l.strip().rstrip(".") for l in stdout.decode().splitlines() if l.strip()]
-        return lines
+        answers = _get_resolver().resolve(domain, rtype, raise_on_no_answer=False)
+        results = []
+        for r in answers:
+            txt = r.to_text().rstrip(".")
+            results.append(txt)
+        return results
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoNameservers,
+            dns.exception.Timeout, dns.resolver.NoAnswer):
+        return []
     except Exception:
         return []
 
 
-async def _dig_soa(domain: str) -> dict | None:
-    """Run dig SOA against 8.8.8.8, return parsed dict or None."""
+def _dns_soa(domain: str) -> dict | None:
+    """Query SOA via dnspython, return parsed dict or None."""
+    import dns.resolver, dns.exception
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "dig", "+short", "+time=3", "+tries=2",
-            domain, "SOA", "@8.8.8.8",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
-        line = stdout.decode().strip()
-        if not line:
-            return None
-        parts = line.split()
-        if len(parts) < 7:
-            return None
-        return {
-            "primary_ns": parts[0].rstrip("."),
-            "email":      parts[1].rstrip(".").replace(".", "@", 1),
-            "serial":     parts[2],
-            "refresh":    parts[3],
-            "retry":      parts[4],
-            "expire":     parts[5],
-            "minimum":    parts[6],
-        }
+        answers = _get_resolver().resolve(domain, "SOA", raise_on_no_answer=False)
+        for r in answers:
+            mname  = str(r.mname).rstrip(".")
+            rname  = str(r.rname).rstrip(".")
+            # rname uses dots for @ — first dot is the @ separator
+            email  = rname.replace(".", "@", 1)
+            return {
+                "primary_ns": mname,
+                "email":      email,
+                "serial":     str(r.serial),
+                "refresh":    str(r.refresh),
+                "retry":      str(r.retry),
+                "expire":     str(r.expire),
+                "minimum":    str(r.minimum),
+            }
+        return None
     except Exception:
         return None
 
@@ -179,20 +190,22 @@ async def _dig_soa(domain: str) -> dict | None:
 @router.get("/lookup/{domain}")
 async def external_lookup(domain: str, user=Depends(get_current_user)):
     """Public DNS lookup for a domain — A, AAAA, NS (with glue IPs), MX, SOA via 8.8.8.8."""
-    a_task    = asyncio.create_task(_dig(domain, "A"))
-    aaaa_task = asyncio.create_task(_dig(domain, "AAAA"))
-    ns_task   = asyncio.create_task(_dig(domain, "NS"))
-    mx_task   = asyncio.create_task(_dig(domain, "MX"))
-    soa_task  = asyncio.create_task(_dig_soa(domain))
-    a, aaaa, ns, mx, soa = await asyncio.gather(a_task, aaaa_task, ns_task, mx_task, soa_task)
+    loop = asyncio.get_running_loop()
+
+    a, aaaa, ns, mx, soa = await asyncio.gather(
+        loop.run_in_executor(None, _dns_query, domain, "A"),
+        loop.run_in_executor(None, _dns_query, domain, "AAAA"),
+        loop.run_in_executor(None, _dns_query, domain, "NS"),
+        loop.run_in_executor(None, _dns_query, domain, "MX"),
+        loop.run_in_executor(None, _dns_soa,   domain),
+    )
 
     # Resolve each NS hostname → its own A record (glue IP) in parallel
-    ns_ip_tasks = {n: asyncio.create_task(_dig(n, "A")) for n in ns}
-    ns_ips: dict[str, list[str]] = {}
-    for name, task in ns_ip_tasks.items():
-        ns_ips[name] = await task
+    ns_ip_results = await asyncio.gather(
+        *[loop.run_in_executor(None, _dns_query, n, "A") for n in ns]
+    )
+    ns_ips = {n: ips for n, ips in zip(ns, ns_ip_results)}
 
-    # Server IP from env — used by frontend to assess delegation
     server_ip = os.getenv("SERVER_IP", "")
 
     return {
