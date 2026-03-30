@@ -102,11 +102,12 @@ def _update_env_ip(ipv4: str, ipv6: str = "") -> None:
         log.warning("Could not update SERVER_IP in .env: %s", exc)
 
 
-async def ip_check_loop(interval: int = 3600) -> None:
-    """Every *interval* seconds:
+async def ip_check_loop(interval: int = 60) -> None:
+    """Every *interval* seconds (default 60 s):
       - Detect external IPv4, external IPv6, and internal IP.
-      - On any change: update the effective IP, rewrite .env, and run a full DNS sync
-        (all A/AAAA records + NS records) so PowerDNS immediately reflects the new address.
+      - On any change: update the effective IP, rewrite .env, run a full DNS sync,
+        and push a notification so admins know the IP has changed.
+      - Runs immediately on first iteration (no initial sleep).
     """
     global _last_known_ipv4, _last_known_ipv6, _last_known_internal
 
@@ -130,6 +131,7 @@ async def ip_check_loop(interval: int = 3600) -> None:
             )
 
             if changed:
+                prev_ipv4 = _last_known_ipv4
                 log.info(
                     "IP change detected — ext4: %s→%s  ext6: %s→%s  internal: %s→%s",
                     _last_known_ipv4, ipv4,
@@ -152,6 +154,7 @@ async def ip_check_loop(interval: int = 3600) -> None:
                 _last_known_ipv6     = ipv6
                 _last_known_internal = internal
 
+                errors = ns_summary.get("errors", []) + dns_summary.get("errors", [])
                 _last_ip_check.clear()
                 _last_ip_check.update({
                     "external_ipv4": ipv4,
@@ -160,7 +163,7 @@ async def ip_check_loop(interval: int = 3600) -> None:
                     "changed": True,
                     "ns_updated":  len(ns_summary.get("updated", [])),
                     "dns_provisioned": len(dns_summary.get("provisioned", [])),
-                    "errors": ns_summary.get("errors", []) + dns_summary.get("errors", []),
+                    "errors": errors,
                     "checked_at": datetime.now(timezone.utc).isoformat(),
                 })
                 log.info(
@@ -169,6 +172,32 @@ async def ip_check_loop(interval: int = 3600) -> None:
                     len(ns_summary.get("updated", [])),
                     len(dns_summary.get("provisioned", [])),
                 )
+
+                # Push a notification so admins see the IP change in the panel
+                try:
+                    from app.notify import push as _notify
+                    change_desc = f"{prev_ipv4} → {ipv4}" if prev_ipv4 else ipv4
+                    async with AsyncSessionLocal() as _db:
+                        await _notify(
+                            _db,
+                            type    = "ip_changed",
+                            title   = f"Server IP changed: {ipv4}",
+                            message = (
+                                f"External IP changed ({change_desc}). "
+                                f"All DNS A records updated automatically "
+                                f"({len(dns_summary.get('provisioned', []))} zones re-synced)."
+                            ),
+                            details = {
+                                "previous_ip": prev_ipv4 or "unknown",
+                                "new_ip": ipv4,
+                                "ipv6": ipv6 or None,
+                                "internal_ip": internal or None,
+                                "zones_synced": len(dns_summary.get("provisioned", [])),
+                                "errors": errors,
+                            },
+                        )
+                except Exception as _ne:
+                    log.warning("Could not push IP-change notification: %s", _ne)
             else:
                 _last_ip_check.update({
                     "external_ipv4": ipv4,
@@ -182,7 +211,8 @@ async def ip_check_loop(interval: int = 3600) -> None:
         except Exception as exc:
             log.error("IP check loop error: %s", exc)
 
-        await asyncio.sleep(interval)
+        finally:
+            await asyncio.sleep(interval)
 
 
 @router.get("/ip-status", dependencies=[Depends(require_superadmin)])

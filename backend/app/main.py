@@ -129,9 +129,8 @@ async def lifespan(app: FastAPI):
     await _sync_acme_email()
     # Start DNS sync background task (reconciles DB ↔ PowerDNS every 180 s)
     task     = asyncio.create_task(dns_sync.dns_sync_loop(interval=180))
-    # Check external IPv4, external IPv6, and internal IP every hour.
-    # On any change: rewrite .env and run a full DNS sync (A + NS records).
-    ns_task  = asyncio.create_task(dns_sync.ip_check_loop(interval=3600))
+    # Check external IP every 60 s. On change: rewrite .env, full DNS sync, notify.
+    ns_task  = asyncio.create_task(dns_sync.ip_check_loop(interval=60))
     yield
     task.cancel()
     ns_task.cancel()
