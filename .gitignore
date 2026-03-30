@@ -35,3 +35,15 @@ acme.json
 *.swp
 *.swo
 Thumbs.db
+
+# AI / Claude generated files — never publish
+docs/superpowers/
+.complexity-log.md
+.session-summary.md
+.project-structure.md
+.GnuKontrolR-project-structure.md
+.todos-report.md
+frontend/.complexity-log.md
+frontend/.session-summary.md
+frontend/.project-structure.md
+frontend/.todos-report.md
