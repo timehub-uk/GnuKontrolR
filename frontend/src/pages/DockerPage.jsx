@@ -6,6 +6,51 @@ import {
   AlertCircle, Plug, Shield,
 } from 'lucide-react';
 
+// ── Port string parser ────────────────────────────────────────────────────────
+// Input:  "0.0.0.0:32768->80/tcp, 127.0.0.1:9000->9000/tcp, :::32769->443/tcp"
+// Output: [{ ip, host_port, container_port, proto }]
+function parsePorts(raw) {
+  if (!raw || raw === '—') return [];
+  return raw.split(',').map(s => s.trim()).filter(Boolean).map(seg => {
+    // seg: "0.0.0.0:32768->80/tcp"  or  ":::32768->80/tcp"
+    const arrow = seg.indexOf('->');
+    if (arrow === -1) return { ip: '', host_port: seg, container_port: '', proto: '' };
+    const left  = seg.slice(0, arrow);   // "0.0.0.0:32768" or ":::32768"
+    const right = seg.slice(arrow + 2);  // "80/tcp"
+    const slashIdx = right.lastIndexOf('/');
+    const container_port = slashIdx >= 0 ? right.slice(0, slashIdx) : right;
+    const proto          = slashIdx >= 0 ? right.slice(slashIdx + 1) : '';
+    // Split ip and host port — last colon is the port separator
+    const colonIdx = left.lastIndexOf(':');
+    const ip        = colonIdx >= 0 ? left.slice(0, colonIdx) : '';
+    const host_port = colonIdx >= 0 ? left.slice(colonIdx + 1) : left;
+    // Normalise bind addresses
+    const ip_display = (!ip || ip === '0.0.0.0' || ip === '::' || ip === ':::') ? '0.0.0.0' : ip;
+    return { ip: ip_display, host_port, container_port, proto };
+  });
+}
+
+function PortsCell({ raw }) {
+  const mappings = parsePorts(raw);
+  if (!mappings.length) return <span className="text-gray-600 text-xs">—</span>;
+  return (
+    <div className="flex flex-col gap-0.5">
+      {mappings.map((m, i) => (
+        <div key={i} className="flex items-center gap-1 text-[11px] font-mono leading-tight">
+          <span className="text-gray-500">{m.ip}</span>
+          <span className="text-gray-600">:</span>
+          <span className="text-blue-300 font-semibold">{m.host_port}</span>
+          <span className="text-gray-600 mx-0.5">→</span>
+          <span className="text-gray-400">{m.container_port}</span>
+          {m.proto && (
+            <span className="text-gray-600 text-[10px]">/{m.proto}</span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── Port range reference (mirrors backend PORT_RANGES) ───────────────────────
 const SERVICE_META = {
   ssh:       { label: 'SSH / SFTP',     color: 'text-blue-400',   bg: 'bg-blue-900/20 border-blue-800' },
@@ -251,7 +296,7 @@ export default function DockerPage() {
                   <td className="px-4 py-3 text-gray-400 font-mono text-xs">
                     {memUsed(rawName)}
                   </td>
-                  <td className="px-4 py-3 text-gray-500 text-xs">{c.Ports || '—'}</td>
+                  <td className="px-4 py-3"><PortsCell raw={c.Ports} /></td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
                       <button title="Start"   onClick={() => action(rawName, 'start')}   className="text-green-500 hover:text-green-300"><Play size={13} /></button>
