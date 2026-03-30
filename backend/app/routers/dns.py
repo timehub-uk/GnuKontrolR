@@ -165,13 +165,33 @@ async def _dig_soa(domain: str) -> dict | None:
 
 @router.get("/lookup/{domain}")
 async def external_lookup(domain: str, user=Depends(get_current_user)):
-    """Public DNS lookup for a domain — A, NS, MX, SOA records via 8.8.8.8."""
-    a_task   = asyncio.create_task(_dig(domain, "A"))
-    ns_task  = asyncio.create_task(_dig(domain, "NS"))
-    mx_task  = asyncio.create_task(_dig(domain, "MX"))
-    soa_task = asyncio.create_task(_dig_soa(domain))
-    a, ns, mx, soa = await asyncio.gather(a_task, ns_task, mx_task, soa_task)
-    return {"domain": domain, "A": a, "NS": ns, "MX": mx, "SOA": soa}
+    """Public DNS lookup for a domain — A, AAAA, NS (with glue IPs), MX, SOA via 8.8.8.8."""
+    a_task    = asyncio.create_task(_dig(domain, "A"))
+    aaaa_task = asyncio.create_task(_dig(domain, "AAAA"))
+    ns_task   = asyncio.create_task(_dig(domain, "NS"))
+    mx_task   = asyncio.create_task(_dig(domain, "MX"))
+    soa_task  = asyncio.create_task(_dig_soa(domain))
+    a, aaaa, ns, mx, soa = await asyncio.gather(a_task, aaaa_task, ns_task, mx_task, soa_task)
+
+    # Resolve each NS hostname → its own A record (glue IP) in parallel
+    ns_ip_tasks = {n: asyncio.create_task(_dig(n, "A")) for n in ns}
+    ns_ips: dict[str, list[str]] = {}
+    for name, task in ns_ip_tasks.items():
+        ns_ips[name] = await task
+
+    # Server IP from env — used by frontend to assess delegation
+    server_ip = os.getenv("SERVER_IP", "")
+
+    return {
+        "domain":    domain,
+        "A":         a,
+        "AAAA":      aaaa,
+        "NS":        ns,
+        "ns_ips":    ns_ips,
+        "MX":        mx,
+        "SOA":       soa,
+        "server_ip": server_ip,
+    }
 
 
 @router.patch("/zones/{zone}/kind")

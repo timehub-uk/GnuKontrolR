@@ -4,6 +4,7 @@ import { toastSuccess, toastError } from '../utils/toast';
 import {
   Globe, Plus, Trash2, RefreshCw, AlertTriangle, Loader,
   ShieldCheck, Search, Server, ArrowLeftRight, Hash,
+  CheckCircle, XCircle, ExternalLink,
 } from 'lucide-react';
 
 const DNS_PORTS = [
@@ -567,55 +568,153 @@ export default function DnsPage() {
           </div>
         ) : extLookup ? (
           <div className="space-y-4">
+
+            {/* ── Delegation status banner ── */}
             {(() => {
-              const provider = detectDnsProvider(extLookup.NS);
-              return provider ? (
-                <div className="flex items-center gap-2 text-[12px] text-ink-secondary bg-panel-elevated/60 rounded-lg px-3 py-2 border border-panel-border w-fit">
-                  <Server size={12} className="text-brand shrink-0" />
-                  <span>DNS hosted by <span className="font-semibold text-ink-primary">{provider.name}</span></span>
-                  {provider.url && (
-                    <a
-                      href={provider.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-brand-light underline underline-offset-2 hover:text-brand ml-1"
-                    >
-                      ↗ Visit
-                    </a>
+              const srv = extLookup.server_ip;
+              const nsIps = Object.values(extLookup.ns_ips || {}).flat();
+              const delegated = srv && nsIps.length > 0 && nsIps.some(ip => ip === srv);
+              const hasAAAA   = (extLookup.AAAA || []).length > 0;
+              const aPointsHere = srv && (extLookup.A || []).includes(srv);
+              const provider  = detectDnsProvider(extLookup.NS);
+
+              return (
+                <div className="space-y-2">
+                  {/* Delegation row */}
+                  <div className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 border text-[12px] ${
+                    delegated
+                      ? 'bg-ok/10 border-ok/25 text-ok-light'
+                      : 'bg-warn/10 border-warn/25 text-warn-light'
+                  }`}>
+                    {delegated
+                      ? <CheckCircle size={14} className="shrink-0" />
+                      : <AlertTriangle size={14} className="shrink-0" />}
+                    <span className="font-semibold">
+                      {delegated ? 'Delegated to this server' : 'Not yet delegated to this server'}
+                    </span>
+                    {!delegated && srv && (
+                      <span className="text-ink-muted font-normal ml-1">
+                        — NS servers resolve to {nsIps[0] || '?'}, expected {srv}. Update glue records at your registrar.
+                      </span>
+                    )}
+                  </div>
+
+                  {/* A record points here */}
+                  {srv && (
+                    <div className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 border text-[12px] ${
+                      aPointsHere
+                        ? 'bg-ok/10 border-ok/25 text-ok-light'
+                        : 'bg-bad/10 border-bad/25 text-bad-light'
+                    }`}>
+                      {aPointsHere ? <CheckCircle size={14} className="shrink-0" /> : <XCircle size={14} className="shrink-0" />}
+                      <span className="font-semibold">
+                        {aPointsHere ? 'A record points to this server' : 'A record points elsewhere'}
+                      </span>
+                      {!aPointsHere && extLookup.A?.length > 0 && (
+                        <span className="text-ink-muted font-normal ml-1 font-mono">
+                          — currently {extLookup.A[0]}, expected {srv}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* AAAA warning */}
+                  {hasAAAA && (
+                    <div className="flex items-start gap-2.5 rounded-lg px-3 py-2.5 border bg-bad/10 border-bad/25 text-bad-light text-[12px]">
+                      <XCircle size={14} className="shrink-0 mt-0.5" />
+                      <div>
+                        <span className="font-semibold">IPv6 (AAAA) records exist — will break Let's Encrypt</span>
+                        <span className="text-ink-muted font-normal ml-1">
+                          — LE validates via IPv6 first. Remove these AAAA records at your DNS provider if this server has no IPv6.
+                        </span>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {extLookup.AAAA.map((v, i) => (
+                            <span key={i} className="font-mono text-[11px] bg-bad/15 px-1.5 py-0.5 rounded">{v}</span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* DNS provider badge */}
+                  {provider && (
+                    <div className="flex items-center gap-2 text-[12px] text-ink-secondary bg-panel-elevated/60 rounded-lg px-3 py-2 border border-panel-border w-fit">
+                      <Server size={12} className="text-brand shrink-0" />
+                      <span>DNS hosted by <span className="font-semibold text-ink-primary">{provider.name}</span></span>
+                      {provider.url && (
+                        <a href={provider.url} target="_blank" rel="noopener noreferrer"
+                          className="text-brand-light hover:text-brand ml-1 flex items-center gap-0.5">
+                          <ExternalLink size={11} /> Visit
+                        </a>
+                      )}
+                    </div>
                   )}
                 </div>
-              ) : null;
+              );
             })()}
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* ── Record columns ── */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+
               {/* A records */}
               <div>
                 <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-ok" /> A — IP Address
+                  <span className="w-2 h-2 rounded-full bg-ok" /> A — IPv4
                 </p>
-                {extLookup.A?.length ? extLookup.A.map((v, i) => (
-                  <p key={i} className="font-mono text-xs text-ink-primary bg-panel-elevated px-2 py-1 rounded mb-1">{v}</p>
-                )) : <p className="text-xs text-ink-muted">No A record found</p>}
+                {extLookup.A?.length ? extLookup.A.map((v, i) => {
+                  const isOurs = v === extLookup.server_ip;
+                  return (
+                    <div key={i} className={`font-mono text-xs px-2 py-1 rounded mb-1 flex items-center gap-1.5 ${isOurs ? 'bg-ok/10 text-ok-light border border-ok/20' : 'bg-panel-elevated text-ink-primary'}`}>
+                      {isOurs && <CheckCircle size={10} />}
+                      {v}
+                    </div>
+                  );
+                }) : <p className="text-xs text-ink-muted">No A record</p>}
               </div>
 
-              {/* NS records */}
+              {/* AAAA records */}
               <div>
                 <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
-                  <Server size={11} /> NS — DNS Hosting
+                  <span className="w-2 h-2 rounded-full bg-violet-400" /> AAAA — IPv6
                 </p>
-                {extLookup.NS?.length ? extLookup.NS.map((v, i) => (
-                  <p key={i} className="font-mono text-xs text-ink-primary bg-panel-elevated px-2 py-1 rounded mb-1">{v}</p>
-                )) : <p className="text-xs text-ink-muted">No NS records found</p>}
+                {extLookup.AAAA?.length ? extLookup.AAAA.map((v, i) => (
+                  <div key={i} className="font-mono text-xs px-2 py-1 rounded mb-1 flex items-center gap-1.5 bg-bad/10 text-bad-light border border-bad/20">
+                    <AlertTriangle size={10} />
+                    {v}
+                  </div>
+                )) : <p className="text-xs text-ink-muted">No AAAA record <span className="text-ok-light">✓</span></p>}
+              </div>
+
+              {/* NS with glue IPs */}
+              <div>
+                <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                  <Server size={11} /> NS — Nameservers
+                </p>
+                {extLookup.NS?.length ? extLookup.NS.map((ns, i) => {
+                  const ips = extLookup.ns_ips?.[ns] || [];
+                  const isOurs = ips.some(ip => ip === extLookup.server_ip);
+                  return (
+                    <div key={i} className={`text-xs px-2 py-1.5 rounded mb-1 border ${isOurs ? 'bg-ok/10 border-ok/20' : 'bg-panel-elevated border-panel-border'}`}>
+                      <div className={`font-mono flex items-center gap-1 ${isOurs ? 'text-ok-light' : 'text-ink-primary'}`}>
+                        {isOurs ? <CheckCircle size={10} /> : <XCircle size={10} className="text-warn" />}
+                        {ns}
+                      </div>
+                      {ips.length > 0 && (
+                        <div className="text-[11px] text-ink-muted font-mono mt-0.5 pl-3.5">{ips.join(', ')}</div>
+                      )}
+                    </div>
+                  );
+                }) : <p className="text-xs text-ink-muted">No NS records</p>}
               </div>
 
               {/* MX records */}
               <div>
                 <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
-                  <Globe size={11} /> MX — Mail Hosting
+                  <Globe size={11} /> MX — Mail
                 </p>
                 {extLookup.MX?.length ? extLookup.MX.map((v, i) => (
                   <p key={i} className="font-mono text-xs text-ink-primary bg-panel-elevated px-2 py-1 rounded mb-1">{v}</p>
-                )) : <p className="text-xs text-ink-muted">No MX records found</p>}
+                )) : <p className="text-xs text-ink-muted">No MX records</p>}
               </div>
             </div>
 
@@ -623,7 +722,7 @@ export default function DnsPage() {
             {extLookup.SOA && (
               <div>
                 <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
-                  <Hash size={11} /> SOA — External Authority (via 8.8.8.8)
+                  <Hash size={11} /> SOA — Start of Authority (via 8.8.8.8)
                 </p>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                   {[
