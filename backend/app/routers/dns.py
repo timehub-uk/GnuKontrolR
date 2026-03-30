@@ -111,7 +111,7 @@ def _zone_create_payload(zone_id: str) -> dict:
     soa_content = f"{primary_ns} {hostmaster} 1 10800 3600 604800 3600"
     return {
         "name": zone_id,
-        "kind": "Native",
+        "kind": "Primary",
         "nameservers": [],
         "rrsets": [{
             "name": zone_id,

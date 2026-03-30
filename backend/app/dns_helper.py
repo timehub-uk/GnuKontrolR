@@ -252,13 +252,19 @@ def _aaaa(name: str, ipv6: str, ttl: int = 300) -> dict:
     }
 
 
-def _mx(domain: str, mail_host: str, priority: int = 10, ttl: int = 300) -> dict:
+def _mx(domain: str, mail_host: str, ttl: int = 300) -> dict:
+    """Three MX records at priorities 5 / 10 / 15, all pointing to mail_host."""
+    host = _z(mail_host)
     return {
         "name": _z(domain),
         "type": "MX",
         "ttl": ttl,
         "changetype": "REPLACE",
-        "records": [{"content": f"{priority} {_z(mail_host)}", "disabled": False}],
+        "records": [
+            {"content": f"5 {host}",  "disabled": False},
+            {"content": f"10 {host}", "disabled": False},
+            {"content": f"15 {host}", "disabled": False},
+        ],
     }
 
 
@@ -457,7 +463,7 @@ async def _ensure_zone(client: httpx.AsyncClient, zone: str) -> bool:
                     headers=_HEADERS,
                     json={
                         "name": zone,
-                        "kind": "Native",
+                        "kind": "Primary",
                         "nameservers": [],
                         "rrsets": [{
                             "name": zone,
