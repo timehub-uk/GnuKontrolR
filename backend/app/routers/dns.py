@@ -219,7 +219,11 @@ async def set_zone_kind(zone: str, req: ZoneKindRequest, user=Depends(require_ad
     req = ZoneKindRequest(kind=kind)
     zone_id = zone if zone.endswith(".") else zone + "."
     try:
-        return await pdns_patch(f"/zones/{zone_id}", {"kind": req.kind})
+        # Zone metadata changes (kind) require PUT, not PATCH in PowerDNS 4.x
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.put(f"{PDNS_BASE}/zones/{zone_id}", headers=HEADERS, json={"kind": req.kind})
+            r.raise_for_status()
+        return {"ok": True, "zone": zone, "kind": req.kind}
     except httpx.HTTPError as e:
         raise HTTPException(502, f"PowerDNS error: {e}")
 
