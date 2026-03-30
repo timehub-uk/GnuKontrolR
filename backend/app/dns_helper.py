@@ -448,16 +448,50 @@ async def _ensure_zone(client: httpx.AsyncClient, zone: str) -> bool:
         try:
             resp = await client.get(f"{PDNS_BASE}/zones/{zone}", headers=_HEADERS)
             if resp.status_code == 404:
+                zone_name  = zone.rstrip(".")
+                primary_ns = f"ns1.{zone_name}."
+                hostmaster = f"hostmaster.{zone_name}."
+                soa_content = f"{primary_ns} {hostmaster} 1 10800 3600 604800 3600"
                 cr = await client.post(
                     f"{PDNS_BASE}/zones",
                     headers=_HEADERS,
-                    json={"name": zone, "kind": "Native", "nameservers": [], "rrsets": []},
+                    json={
+                        "name": zone,
+                        "kind": "Native",
+                        "nameservers": [],
+                        "rrsets": [{
+                            "name": zone,
+                            "type": "SOA",
+                            "ttl": 3600,
+                            "records": [{"content": soa_content, "disabled": False}],
+                        }],
+                    },
                 )
                 if cr.status_code in (200, 201, 204, 422):
                     # 422 here = zone already exists (race condition) — that's fine
                     return True
                 cr.raise_for_status()
             elif resp.status_code in (200, 204):
+                # Zone exists — check SOA primary NS and repair if misconfigured
+                zone_name   = zone.rstrip(".")
+                correct_ns  = f"ns1.{zone_name}."
+                zdata       = resp.json() if resp.content else {}
+                for rr in zdata.get("rrsets", []):
+                    if rr["type"] == "SOA" and rr.get("records"):
+                        parts = rr["records"][0]["content"].split()
+                        if len(parts) >= 7 and ("misconfigured" in parts[0] or parts[0] != correct_ns):
+                            hostmaster  = f"hostmaster.{zone_name}."
+                            new_serial  = str(int(parts[2]) + 1)
+                            new_content = " ".join([correct_ns, parts[1], new_serial] + parts[3:])
+                            await client.patch(
+                                f"{PDNS_BASE}/zones/{zone}",
+                                headers=_HEADERS,
+                                json={"rrsets": [{
+                                    "name": zone, "type": "SOA", "ttl": rr.get("ttl", 3600),
+                                    "changetype": "REPLACE",
+                                    "records": [{"content": new_content, "disabled": False}],
+                                }]},
+                            )
                 return True
             else:
                 resp.raise_for_status()

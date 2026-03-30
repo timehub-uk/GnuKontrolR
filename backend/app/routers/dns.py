@@ -103,17 +103,30 @@ async def delete_record(zone: str, name: str, type: str, user=Depends(require_ad
         raise HTTPException(502, f"PowerDNS error: {e}")
 
 
-@router.post("/zones")
-async def create_zone(zone: str, user=Depends(require_admin)):
-    zone_id = zone if zone.endswith(".") else zone + "."
-    payload = {
+def _zone_create_payload(zone_id: str) -> dict:
+    """Build a zone creation payload with a correct SOA primary NS."""
+    zone_name = zone_id.rstrip(".")
+    primary_ns = f"ns1.{zone_name}."
+    hostmaster = f"hostmaster.{zone_name}."
+    soa_content = f"{primary_ns} {hostmaster} 1 10800 3600 604800 3600"
+    return {
         "name": zone_id,
         "kind": "Native",
         "nameservers": [],
-        "rrsets": [],
+        "rrsets": [{
+            "name": zone_id,
+            "type": "SOA",
+            "ttl": 3600,
+            "records": [{"content": soa_content, "disabled": False}],
+        }],
     }
+
+
+@router.post("/zones")
+async def create_zone(zone: str, user=Depends(require_admin)):
+    zone_id = zone if zone.endswith(".") else zone + "."
     try:
-        return await pdns_post("/zones", payload)
+        return await pdns_post("/zones", _zone_create_payload(zone_id))
     except httpx.HTTPError as e:
         raise HTTPException(502, f"PowerDNS error: {e}")
 
@@ -282,9 +295,8 @@ async def ensure_zone(zone: str, user=Depends(require_admin)):
         return await pdns_get(f"/zones/{zone_id}")
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
-            payload = {"name": zone_id, "kind": "Native", "nameservers": [], "rrsets": []}
             try:
-                return await pdns_post("/zones", payload)
+                return await pdns_post("/zones", _zone_create_payload(zone_id))
             except httpx.HTTPError as e2:
                 raise HTTPException(502, f"PowerDNS error: {e2}")
         raise HTTPException(502, str(e))
