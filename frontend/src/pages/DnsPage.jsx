@@ -37,10 +37,51 @@ function PortPill({ port, proto }) {
   );
 }
 
-function SubdomainPill() {
+const ROLE_STYLES = {
+  'Nameserver':  'bg-blue-500/15 text-blue-300 border-blue-500/25',
+  'Mail':        'bg-amber-500/15 text-amber-300 border-amber-500/25',
+  'SPF':         'bg-emerald-500/15 text-emerald-300 border-emerald-500/25',
+  'DKIM':        'bg-teal-500/15 text-teal-300 border-teal-500/25',
+  'DMARC':       'bg-cyan-500/15 text-cyan-300 border-cyan-500/25',
+  'Security':    'bg-rose-500/15 text-rose-300 border-rose-500/25',
+  'IPv4':        'bg-green-500/15 text-green-300 border-green-500/25',
+  'IPv6':        'bg-indigo-500/15 text-indigo-300 border-indigo-500/25',
+  'Alias':       'bg-purple-500/15 text-purple-300 border-purple-500/25',
+  'Service':     'bg-orange-500/15 text-orange-300 border-orange-500/25',
+  'Text':        'bg-slate-500/15 text-slate-300 border-slate-500/25',
+  'Authority':   'bg-pink-500/15 text-pink-300 border-pink-500/25',
+  'Subdomain':   'bg-violet-500/15 text-violet-300 border-violet-500/25',
+  'Apex':        'bg-sky-500/15 text-sky-300 border-sky-500/25',
+};
+
+function classifyRecord(type, name, content, zone) {
+  const apex = (zone || '').replace(/\.$/, '');
+  const n    = (name || '').replace(/\.$/, '');
+  const c    = (content || '').toLowerCase();
+  const isSub = apex && n !== apex && n !== '@' && n !== '' && n.endsWith(`.${apex}`);
+
+  if (type === 'NS')   return 'Nameserver';
+  if (type === 'SOA')  return 'Authority';
+  if (type === 'MX')   return 'Mail';
+  if (type === 'AAAA') return isSub ? 'Subdomain' : 'IPv6';
+  if (type === 'A')    return isSub ? 'Subdomain' : 'Apex';
+  if (type === 'CNAME') return 'Alias';
+  if (type === 'SRV')  return 'Service';
+  if (type === 'CAA')  return 'Security';
+  if (type === 'TXT') {
+    if (c.startsWith('v=spf1'))  return 'SPF';
+    if (c.includes('v=dkim1'))   return 'DKIM';
+    if (n.startsWith('_dmarc'))  return 'DMARC';
+    return 'Text';
+  }
+  return isSub ? 'Subdomain' : 'Text';
+}
+
+function RolePill({ role }) {
+  const cls = ROLE_STYLES[role] || ROLE_STYLES['Text'];
   return (
-    <span className="inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/25 select-none">
-      Subdomain
+    <span className={`inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded-full border select-none whitespace-nowrap ${cls}`}>
+      {role}
     </span>
   );
 }
@@ -546,7 +587,7 @@ export default function DnsPage() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-panel-border">
-              {['Type', 'Name', 'Content', 'TTL', 'Actions'].map(h => (
+              {['Type', 'Role', 'Name', 'Content', 'TTL', 'Actions'].map(h => (
                 <th key={h} className="tbl-head">{h}</th>
               ))}
             </tr>
@@ -554,40 +595,41 @@ export default function DnsPage() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={5} className="text-center py-10 text-ink-muted text-sm">
+                <td colSpan={6} className="text-center py-10 text-ink-muted text-sm">
                   <Loader size={16} className="animate-spin inline mr-2" />Loading records…
                 </td>
               </tr>
             ) : records.length === 0 ? (
               <tr>
-                <td colSpan={5} className="text-center py-10 text-ink-muted text-sm">
+                <td colSpan={6} className="text-center py-10 text-ink-muted text-sm">
                   {selected ? 'No records found.' : 'Select a domain to view DNS records.'}
                 </td>
               </tr>
-            ) : records.map((r, i) => (
-              <tr key={i} className="border-b border-panel-border/50 hover:bg-panel-elevated transition-colors">
-                <td className="tbl-cell">
-                  <span className="font-mono text-xs bg-panel-elevated px-1.5 py-0.5 rounded">{r.type}</span>
-                </td>
-                <td className="tbl-cell">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="font-mono text-xs">{r.name}</span>
-                    {isSubdomain(r.name) && <SubdomainPill />}
-                  </div>
-                </td>
-                <td className="tbl-cell font-mono text-xs text-ink-secondary">{r.content}</td>
-                <td className="tbl-cell text-ink-muted">{r.ttl}</td>
-                <td className="tbl-cell">
-                  <button
-                    onClick={() => handleDeleteRecord(r.name, r.type)}
-                    className="text-ink-muted hover:text-bad-light transition-colors p-1"
-                    title="Delete record"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </td>
-              </tr>
-            ))}
+            ) : records.map((r, i) => {
+              const role = classifyRecord(r.type, r.name, r.content, selected);
+              return (
+                <tr key={i} className="border-b border-panel-border/50 hover:bg-panel-elevated transition-colors">
+                  <td className="tbl-cell">
+                    <span className="font-mono text-xs bg-panel-elevated px-1.5 py-0.5 rounded">{r.type}</span>
+                  </td>
+                  <td className="tbl-cell">
+                    <RolePill role={role} />
+                  </td>
+                  <td className="tbl-cell font-mono text-xs text-ink-secondary">{r.name}</td>
+                  <td className="tbl-cell font-mono text-xs text-ink-muted max-w-xs truncate">{r.content}</td>
+                  <td className="tbl-cell text-ink-muted text-xs">{r.ttl}</td>
+                  <td className="tbl-cell">
+                    <button
+                      onClick={() => handleDeleteRecord(r.name, r.type)}
+                      className="text-ink-muted hover:text-bad-light transition-colors p-1"
+                      title="Delete record"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
