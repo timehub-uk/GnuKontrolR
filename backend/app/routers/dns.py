@@ -4,7 +4,11 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import require_admin, get_current_user
+from app.database import get_db
+from app.notify import push as notify_push
+from app.routers.dns_sync import DNS_SYNC_INTERVAL_SECONDS
 
 router = APIRouter(prefix="/api/dns", tags=["dns"])
 
@@ -68,7 +72,7 @@ async def get_zone(zone: str, user=Depends(require_admin)):
 
 
 @router.post("/zones/{zone}/records")
-async def add_record(zone: str, req: RecordRequest, user=Depends(require_admin)):
+async def add_record(zone: str, req: RecordRequest, user=Depends(require_admin), db: AsyncSession = Depends(get_db)):
     zone_id = zone if zone.endswith(".") else zone + "."
     name    = req.name if req.name.endswith(".") else req.name + "."
     payload = {
@@ -81,9 +85,19 @@ async def add_record(zone: str, req: RecordRequest, user=Depends(require_admin))
         }]
     }
     try:
-        return await pdns_patch(f"/zones/{zone_id}", payload)
+        result = await pdns_patch(f"/zones/{zone_id}", payload)
     except httpx.HTTPError as e:
         raise HTTPException(502, f"PowerDNS error: {e}")
+
+    mins = (DNS_SYNC_INTERVAL_SECONDS + 59) // 60
+    asyncio.create_task(notify_push(
+        db,
+        type    = "dns_record_updated",
+        title   = f"DNS edit applied — {zone}",
+        message = f"{req.type.upper()} record '{req.name}' updated. Will be published in ~{mins} min.",
+        details = {"zone": zone, "type": req.type.upper(), "name": req.name, "content": req.content},
+    ))
+    return result
 
 
 @router.delete("/zones/{zone}/records")
