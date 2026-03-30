@@ -618,7 +618,12 @@ export default function DnsPage() {
 
             {/* DNS provider badge */}
             {(() => {
-              const provider = detectDnsProvider(extLookup.NS);
+              const provider = detectDnsProvider(extLookup.NS)
+                || (() => {
+                  // Fall back to PTR-derived company from NS IPs
+                  const company = Object.values(extLookup.ns_companies || {}).find(Boolean);
+                  return company ? { name: company, url: null } : null;
+                })();
               return provider ? (
                 <div className="flex items-center gap-2 text-[12px] text-ink-secondary bg-panel-elevated/60 rounded-lg px-3 py-2 border border-panel-border w-fit">
                   <Server size={12} className="text-brand shrink-0" />
@@ -671,8 +676,9 @@ export default function DnsPage() {
                   <Server size={11} /> NS — Nameservers
                 </p>
                 {extLookup.NS?.length ? extLookup.NS.map((ns, i) => {
-                  const ips = extLookup.ns_ips?.[ns] || [];
-                  const isOurs = ips.some(ip => ip === extLookup.server_ip);
+                  const ips     = extLookup.ns_ips?.[ns] || [];
+                  const isOurs  = ips.some(ip => ip === extLookup.server_ip);
+                  const company = ips.map(ip => extLookup.ns_companies?.[ip]).find(Boolean) || '';
                   return (
                     <div key={i} className={`text-xs px-2 py-1.5 rounded mb-1 border ${isOurs ? 'bg-ok/10 border-ok/20' : 'bg-panel-elevated border-panel-border'}`}>
                       <div className={`font-mono flex items-center gap-1 ${isOurs ? 'text-ok-light' : 'text-ink-primary'}`}>
@@ -681,6 +687,9 @@ export default function DnsPage() {
                       </div>
                       {ips.length > 0 && (
                         <div className="text-[11px] text-ink-muted font-mono mt-0.5 pl-3.5">{ips.join(', ')}</div>
+                      )}
+                      {company && (
+                        <div className="text-[11px] text-brand-light mt-0.5 pl-3.5">{company}</div>
                       )}
                     </div>
                   );

@@ -163,6 +163,57 @@ def _dns_query(domain: str, rtype: str) -> list[str]:
         return []
 
 
+def _dns_ptr(ip: str) -> str:
+    """Reverse PTR lookup for an IP — returns hostname or empty string."""
+    import dns.reversename, dns.exception
+    try:
+        rev = dns.reversename.from_address(ip)
+        answers = _get_resolver().resolve(rev, "PTR", raise_on_no_answer=False)
+        for r in answers:
+            return str(r.to_text()).rstrip(".")
+        return ""
+    except Exception:
+        return ""
+
+
+def _company_from_ptr(ptr: str) -> str:
+    """Extract a readable company name from a PTR hostname."""
+    if not ptr:
+        return ""
+    # Strip common dynamic-IP prefixes like ip74-208-111-216.pbiaas.com → pbiaas.com
+    import re
+    # Remove leading segments that look like encoded IPs or hostnames
+    parts = ptr.split(".")
+    # Take last 2 parts as the domain (e.g. pbiaas.com, godaddy.com)
+    if len(parts) >= 2:
+        apex = ".".join(parts[-2:])
+        # Map known apex domains to friendly names
+        _KNOWN = {
+            "pbiaas.com":        "PurelyBrands / Web.com",
+            "web.com":           "Web.com",
+            "networksolutions.com": "Network Solutions",
+            "godaddy.com":       "GoDaddy",
+            "cloudflare.com":    "Cloudflare",
+            "awsdns.com":        "Amazon Route 53",
+            "awsdns.net":        "Amazon Route 53",
+            "awsdns.org":        "Amazon Route 53",
+            "awsdns.info":       "Amazon Route 53",
+            "hetzner.com":       "Hetzner",
+            "ovh.net":           "OVH",
+            "digitalocean.com":  "DigitalOcean",
+            "linode.com":        "Linode / Akamai",
+            "vultr.com":         "Vultr",
+            "namecheap.com":     "Namecheap",
+            "registrar-servers.com": "Namecheap",
+            "domaincontrol.com": "GoDaddy",
+            "name-services.com": "enom / Tucows",
+            "ultradns.net":      "UltraDNS",
+            "dynect.net":        "Dyn DNS",
+        }
+        return _KNOWN.get(apex, apex)
+    return ptr
+
+
 def _dns_soa(domain: str) -> dict | None:
     """Query SOA via dnspython, return parsed dict or None."""
     import dns.resolver, dns.exception
@@ -206,6 +257,16 @@ async def external_lookup(domain: str, user=Depends(get_current_user)):
     )
     ns_ips = {n: ips for n, ips in zip(ns, ns_ip_results)}
 
+    # PTR lookup on each unique NS IP → company name
+    all_ns_ips = list({ip for ips in ns_ips.values() for ip in ips})
+    ptr_results = await asyncio.gather(
+        *[loop.run_in_executor(None, _dns_ptr, ip) for ip in all_ns_ips]
+    )
+    ns_companies = {
+        ip: _company_from_ptr(ptr)
+        for ip, ptr in zip(all_ns_ips, ptr_results)
+    }
+
     server_ip = os.getenv("SERVER_IP", "")
 
     return {
@@ -213,8 +274,9 @@ async def external_lookup(domain: str, user=Depends(get_current_user)):
         "A":         a,
         "AAAA":      aaaa,
         "NS":        ns,
-        "ns_ips":    ns_ips,
-        "MX":        mx,
+        "ns_ips":      ns_ips,
+        "ns_companies": ns_companies,
+        "MX":          mx,
         "SOA":       soa,
         "server_ip": server_ip,
     }
