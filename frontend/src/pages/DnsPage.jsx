@@ -279,6 +279,8 @@ export default function DnsPage() {
   const [loading,   setLoading]   = useState(false);
   const [ensuring,  setEnsuring]  = useState(false);
   const [form, setForm] = useState({ type: 'A', name: '', content: '', ttl: 300 });
+  const [editRecord, setEditRecord] = useState(null);   // { origName, origType, type, name, content, ttl }
+  const [editSaving, setEditSaving] = useState(false);
 
   // External DNS lookup state
   const [extLookup, setExtLookup] = useState(null);
@@ -413,6 +415,34 @@ export default function DnsPage() {
       await loadRecords(selected);
     } catch (e) {
       toastError(e?.response?.data?.detail || 'Failed to delete record');
+    }
+  };
+
+  const handleEditSave = async () => {
+    if (!editRecord || !selected) return;
+    setEditSaving(true);
+    try {
+      const nameChanged = editRecord.name !== editRecord.origName;
+      const typeChanged = editRecord.type !== editRecord.origType;
+      // If name or type changed, remove the old rrset first
+      if (nameChanged || typeChanged) {
+        await api.delete(
+          `/api/dns/zones/${selected}/records?name=${encodeURIComponent(editRecord.origName)}&type=${encodeURIComponent(editRecord.origType)}`
+        );
+      }
+      await api.post(`/api/dns/zones/${selected}/records`, {
+        name:    editRecord.name,
+        type:    editRecord.type,
+        content: editRecord.content,
+        ttl:     editRecord.ttl,
+      });
+      toastSuccess('Record updated');
+      setEditRecord(null);
+      await loadRecords(selected);
+    } catch (e) {
+      toastError(e?.response?.data?.detail || 'Failed to update record');
+    } finally {
+      setEditSaving(false);
     }
   };
 
@@ -616,7 +646,14 @@ export default function DnsPage() {
                     <RolePill role={role} />
                   </td>
                   <td className="tbl-cell font-mono text-xs text-ink-secondary">{r.name}</td>
-                  <td className="tbl-cell font-mono text-xs text-ink-muted max-w-xs truncate">{r.content}</td>
+                  <td
+                    className="tbl-cell font-mono text-xs text-ink-muted max-w-xs truncate cursor-pointer select-none hover:text-ink-primary hover:bg-brand/5 rounded transition-colors"
+                    title="Double-click to edit"
+                    onDoubleClick={() => setEditRecord({
+                      origName: r.name, origType: r.type,
+                      type: r.type, name: r.name, content: r.content, ttl: r.ttl,
+                    })}
+                  >{r.content}</td>
                   <td className="tbl-cell text-ink-muted text-xs">{r.ttl}</td>
                   <td className="tbl-cell">
                     <button
@@ -633,6 +670,70 @@ export default function DnsPage() {
           </tbody>
         </table>
       </div>
+
+      {/* Inline record edit modal */}
+      {editRecord && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setEditRecord(null)}>
+          <div className="bg-panel-800 border border-panel-600 rounded-xl w-full max-w-lg shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-panel-600">
+              <h3 className="text-[14px] font-semibold text-ink-primary flex items-center gap-2">
+                <span className="font-mono text-xs bg-panel-elevated px-2 py-0.5 rounded text-brand-light">{editRecord.origType}</span>
+                Edit DNS Record
+              </h3>
+              <p className="text-[11px] text-ink-muted mt-0.5">Zone: <span className="font-mono">{selected}</span></p>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] text-ink-faint uppercase tracking-wide mb-1">Type</label>
+                  <select
+                    className="input w-full text-xs"
+                    value={editRecord.type}
+                    onChange={e => setEditRecord(r => ({ ...r, type: e.target.value }))}
+                  >
+                    {DNS_TYPES.map(t => <option key={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] text-ink-faint uppercase tracking-wide mb-1">TTL (seconds)</label>
+                  <input
+                    className="input w-full text-xs font-mono"
+                    type="number"
+                    value={editRecord.ttl}
+                    onChange={e => setEditRecord(r => ({ ...r, ttl: parseInt(e.target.value) || 300 }))}
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[10px] text-ink-faint uppercase tracking-wide mb-1">Name</label>
+                <input
+                  className="input w-full text-xs font-mono"
+                  value={editRecord.name}
+                  onChange={e => setEditRecord(r => ({ ...r, name: e.target.value }))}
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] text-ink-faint uppercase tracking-wide mb-1">Content / Value</label>
+                <input
+                  className="input w-full text-xs font-mono"
+                  value={editRecord.content}
+                  onChange={e => setEditRecord(r => ({ ...r, content: e.target.value }))}
+                />
+              </div>
+            </div>
+            <div className="px-5 py-3 border-t border-panel-600">
+              <button
+                onClick={handleEditSave}
+                disabled={editSaving || !editRecord.name || !editRecord.content}
+                className="btn-primary text-sm px-5 py-2 disabled:opacity-50 flex items-center gap-2"
+              >
+                {editSaving ? <Loader size={13} className="animate-spin" /> : null}
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* External DNS lookup panel */}
       <div className="panel p-4">
