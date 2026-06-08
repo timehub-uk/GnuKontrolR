@@ -479,6 +479,7 @@ def _show_tools_list():
         ("db status",            "Test MySQL, PostgreSQL, Redis connectivity"),
         ("db mysql",             "Open an interactive MySQL shell"),
         ("db postgres",          "Open an interactive PostgreSQL shell"),
+        ("update",               "Pull latest code, rebuild & restart"),
         ("log sources",          "List available log sources"),
         ("log view",             "View a log source (--lines N)"),
         ("exit / quit",          "Exit the interactive shell"),
@@ -489,6 +490,55 @@ def _show_tools_list():
     for cmd, desc in tools:
         print(f"    {cmd:<28s} {desc}")
     print()
+
+def cmd_update(args):
+    """Pull latest code, rebuild deps, rebuild Docker images, restart services."""
+    from pathlib import Path
+    import subprocess
+    RED = "\033[0;31m"; GREEN = "\033[0;32m"; YELLOW = "\033[1;33m"
+    CYAN = "\033[0;36m"; BOLD = "\033[1m"; NC = "\033[0m"
+    INSTALL_DIR = "/opt/gnukontrolr"
+    if not Path(INSTALL_DIR).exists():
+        print(f"  {RED}Installation not found at {INSTALL_DIR}{NC}")
+        return
+
+    print(f"  {CYAN}{BOLD}Update — pulling latest code{NC}")
+    r = subprocess.run(["git", "pull", "--ff-only"], cwd=INSTALL_DIR, capture_output=True, text=True)
+    if r.returncode == 0:
+        print(f"  {GREEN}✓{NC} Code up to date")
+    else:
+        print(f"  {YELLOW}!{NC} Git pull: {r.stderr.strip()}")
+
+    print(f"\n  {CYAN}{BOLD}Update — npm dependencies{NC}")
+    r = subprocess.run(["npm", "install", "--loglevel=warn"], cwd=f"{INSTALL_DIR}/frontend", capture_output=True, text=True)
+    if r.returncode == 0:
+        print(f"  {GREEN}✓{NC} npm deps updated")
+    else:
+        print(f"  {YELLOW}!{NC} npm: {(r.stderr or '').split(chr(10))[-2] if r.stderr else r.stdout.split(chr(10))[-2]}")
+
+    print(f"\n  {CYAN}{BOLD}Update — rebuilding frontend{NC}")
+    r = subprocess.run(["npm", "run", "build"], cwd=f"{INSTALL_DIR}/frontend", capture_output=True, text=True)
+    if r.returncode == 0:
+        print(f"  {GREEN}✓{NC} Frontend rebuilt")
+    else:
+        print(f"  {RED}✗{NC} Frontend build: {(r.stderr or '').split(chr(10))[-3] if r.stderr else r.stdout.split(chr(10))[-3]}")
+
+    print(f"\n  {CYAN}{BOLD}Update — rebuilding panel image{NC}")
+    r = subprocess.run(["docker", "compose", "build", "webpanel"], cwd=INSTALL_DIR, capture_output=True, text=True)
+    if r.returncode == 0:
+        print(f"  {GREEN}✓{NC} Panel image rebuilt")
+    else:
+        print(f"  {RED}✗{NC} Build: {(r.stderr or '').split(chr(10))[-2] if r.stderr else r.stdout.split(chr(10))[-2]}")
+
+    print(f"\n  {CYAN}{BOLD}Update — restarting containers{NC}")
+    r = subprocess.run(["docker", "compose", "up", "-d", "--remove-orphans"], cwd=INSTALL_DIR, capture_output=True, text=True)
+    if r.returncode == 0:
+        print(f"  {GREEN}✓{NC} All containers running")
+    else:
+        print(f"  {RED}✗{NC} Restart: {r.stderr.strip()}")
+
+    print(f"\n  {GREEN}{BOLD}Update complete.{NC}")
+
 
 def cmd_shell(args):
     """Interactive shell — type commands without the 'panel' prefix."""
@@ -649,6 +699,10 @@ def _make_parser():
     p_db_mysql.set_defaults(func=lambda a: cmd_db_mysql(a))
     p_db_postgres = p_db_sub.add_parser("postgres", help="Open PostgreSQL shell")
     p_db_postgres.set_defaults(func=lambda a: cmd_db_postgres(a))
+
+    # ── update ──
+    p_update = sub.add_parser("update", help="Pull latest code, rebuild deps & containers, restart")
+    p_update.set_defaults(func=lambda a: cmd_update(a))
 
     # ── shell ──
     p_shell = sub.add_parser("shell", aliases=["sh", "repl"], help="Interactive shell mode")

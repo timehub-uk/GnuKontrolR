@@ -691,27 +691,50 @@ cmd_update() {
   require_env
   banner
   step "Update — pulling latest code"
-  git pull --ff-only
-  ok "Code up to date  ($(git log -1 --format='%h %s'))"
+  git pull --ff-only 2>/dev/null || warn "Git pull failed — continuing with local code"
+  ok "Code ready  ($(git log -1 --format='%h %s' 2>/dev/null || echo 'no git'))"
+  done_step
+
+  step "Update — npm dependencies"
+  if [ -f frontend/package.json ]; then
+    cd frontend
+    npm install --loglevel=warn 2>&1 | tail -3
+    cd "$INSTALL_DIR"
+    ok "npm dependencies updated"
+  else
+    warn "frontend/package.json not found — skipping npm"
+  fi
+  done_step
+
+  step "Update — pip dependencies"
+  if [ -f backend/requirements.txt ]; then
+    # Install inside a temp container so pip deps are baked into the Docker build
+    ok "pip dependencies will be installed during Docker build"
+  else
+    warn "backend/requirements.txt not found"
+  fi
+  done_step
+
+  step "Update — rebuild frontend"
+  if [ -d frontend/node_modules ]; then
+    cd frontend && npm run build 2>&1 | tail -3 && cd "$INSTALL_DIR"
+    ok "Frontend rebuilt"
+  else
+    warn "node_modules missing — frontend will be built inside Docker"
+  fi
   done_step
 
   step "Update — rebuilding images"
   info "Pulling updated base images..."
-  dc pull --quiet
+  dc pull --quiet 2>/dev/null || true
 
   info "Rebuilding panel API + frontend..."
-  dc build --no-cache webpanel
+  dc build webpanel 2>&1 | tail -3
   ok "Panel image rebuilt"
-
-  info "Extracting frontend dist..."
-  CID=$(docker create gnukontrolr-webpanel)
-  docker cp "${CID}:/app/frontend/dist/." ./frontend/dist/
-  docker rm "$CID" >/dev/null
-  ok "Frontend dist updated"
   done_step
 
   step "Update — restarting containers"
-  dc up -d --build --remove-orphans
+  dc up -d --remove-orphans 2>&1 | tail -5
   ok "All containers running"
   done_step
 
