@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import AiPanel from './AiPanel';
 import CommandPalette from './CommandPalette';
+import SetupWizard from './SetupWizard';
 import api from '../utils/api';
 
 // ── Brand logo SVG ────────────────────────────────────────────────────────────
@@ -342,6 +343,7 @@ export default function Layout({ children }) {
 
       <AiPanel />
       <CommandPalette />
+      <SetupWizard />
     </div>
   );
 }
