@@ -15,15 +15,15 @@
     "@tanstack/react-query": "^5.95.2",
     "@tanstack/react-table": "^8.21.3",
     "@uiw/react-codemirror": "^4.25.8",
-    "axios": "^1.7.2",
+    "axios": "^1.16.0",
     "cmdk": "^1.1.1",
     "date-fns": "^4.1.0",
-    "dompurify": "^3.3.3",
+    "dompurify": "^3.4.0",
     "framer-motion": "^12.38.0",
     "lucide-react": "^0.395.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.23.1",
+    "react-router-dom": "^6.30.4",
     "recharts": "^2.12.7",
     "sonner": "^2.0.7",
     "xterm": "^5.3.0",
@@ -31,12 +31,16 @@
     "zod": "^4.3.6",
     "zustand": "^5.0.12"
   },
+  "overrides": {
+    "follow-redirects": ">=1.16.0",
+    "lodash": ">=4.18.0"
+  },
   "devDependencies": {
     "@babel/parser": "^7.29.2",
     "@types/react": "^18.3.3",
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.19",
-    "postcss": "^8.4.38",
+    "postcss": "^8.5.15",
     "tailwindcss": "^3.4.4",
     "vite": "^5.2.13"
   }
