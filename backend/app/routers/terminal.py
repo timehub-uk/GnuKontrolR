@@ -106,10 +106,10 @@ async def terminal_ws(websocket: WebSocket, db: AsyncSession = Depends(get_db)):
     _set_winsize(master_fd, 24, 80)
 
     proc = await asyncio.create_subprocess_exec(
-        "/bin/bash", "--login",
+        "/bin/bash", "--login", "+m",
         stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
         close_fds=True,
-        env={**os.environ, "TERM": "xterm-256color", "HOME": "/root", "USER": "root"},
+        env={**os.environ, "TERM": "xterm-256color", "HOME": "/app", "USER": "panelapi"},
     )
     os.close(slave_fd)
 

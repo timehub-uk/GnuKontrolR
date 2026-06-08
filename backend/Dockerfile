@@ -35,14 +35,16 @@ LABEL description="GnuKontrolR panel API — FastAPI + uvicorn"
 
 # Docker CLI (to manage customer containers from within the panel)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        docker.io curl ca-certificates \
+        docker.io curl ca-certificates default-mysql-client postgresql-client \
     && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir psutil
 
 # ── Non-root panel user ───────────────────────────────────────────────────────
 # panelapi runs the FastAPI process. It is added to the 'docker' group so it
 # can talk to the Docker socket without running as root.
 RUN groupadd -r panelapi \
-    && useradd -r -g panelapi -s /sbin/nologin -d /app -M panelapi \
+    && useradd -r -g panelapi -s /bin/bash -d /app -M panelapi \
     && usermod -aG docker panelapi
 
 # Copy installed Python packages from builder
@@ -50,14 +52,20 @@ COPY --from=builder /install /usr/local
 
 WORKDIR /app
 
-# Copy application source
+# Copy application source (creates /app/app/ Python package)
 COPY backend/app/ ./app/
+
+# Install CLI tool
+RUN chmod +x /app/app/cli.py && ln -sf /app/app/cli.py /usr/local/bin/panel
 
 # Copy built React frontend (from frontend-builder stage)
 COPY --from=frontend-builder /frontend/dist ./frontend/dist/
 
 # Persistent data directory (SQLite DB lives here — mount a volume at /app/data)
 RUN mkdir -p /app/data && chown panelapi:panelapi /app/data
+
+# Create a proper .bashrc for interactive shells (docker exec)
+RUN echo 'export PS1="\u@\h:\w\$ "' > /app/.bashrc && chown panelapi:panelapi /app/.bashrc
 
 # Customer site files root (mount the same volume as the customer containers)
 RUN mkdir -p /var/webpanel/sites && chown panelapi:panelapi /var/webpanel/sites

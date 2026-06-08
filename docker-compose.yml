@@ -33,6 +33,7 @@ volumes:
   postfix_data:
   dovecot_data:
   redis_data:
+  postgres_data:
   webpanel_sites:   # /var/webpanel/sites — customer public_html
   webpanel_db:      # panel SQLite DB
   prometheus_data:
@@ -143,6 +144,25 @@ services:
       - redis_data:/data
     command: redis-server --requirepass ${REDIS_PASSWORD:-changeme_redis} --appendonly yes
 
+  # ── PostgreSQL (shared DB server for customer sites) ────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    container_name: webpanel_postgres
+    restart: unless-stopped
+    networks:
+      - webpanel_net
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme_postgres}
+      - POSTGRES_USER=webpanel
+      - POSTGRES_DB=webpanel
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U webpanel"]
+      interval: 10s
+      retries: 5
+      start_period: 20s
+
   # ── OpenDKIM (DKIM signing milter) ─────────────────────────────────────────
   opendkim:
     build:
@@ -221,6 +241,7 @@ services:
     container_name: webpanel_api
     restart: unless-stopped
     dns:
+      - 127.0.0.11   # Docker embedded DNS (resolves service names like powerdns, mysql)
       - 8.8.8.8
       - 1.1.1.1
     networks:
@@ -228,7 +249,7 @@ services:
     ports:
       - "8000:8000"
     group_add:
-      - "984"   # host docker GID — lets panelapi access /var/run/docker.sock
+      - "${DOCKER_SOCK_GID:-984}"   # host docker GID — lets panelapi access /var/run/docker.sock
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # manage customer containers
       - webpanel_sites:/var/webpanel/sites           # customer files

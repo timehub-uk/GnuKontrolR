@@ -924,8 +924,9 @@ def _install_roundcube(cfg: dict, job_id: str) -> dict:
     if sql_file.exists():
         _push(job_id, "Initialising Roundcube database schema…")
         cmd = ["mysql", "-uroot", db_name]
-        if MYSQL_ROOT_PASS:
-            cmd.insert(2, f"-p{MYSQL_ROOT_PASS}")
+        mysql_pass = _mysql_root_pass()
+        if mysql_pass:
+            cmd.insert(2, f"-p{mysql_pass}")
         with open(str(sql_file)) as f:
             subprocess.run(cmd, stdin=f, check=False, timeout=30)
 
@@ -2538,7 +2539,7 @@ def scanner_quarantine():
         return jsonify({"error": "Invalid area or path"}), 400
 
     try:
-        src = _safe_path(_AREA_PATHS_MAP[area], rel_path)
+        src = _safe(_AREA_PATHS_MAP[area], rel_path)
     except PermissionError as e:
         return jsonify({"error": str(e)}), 403
 

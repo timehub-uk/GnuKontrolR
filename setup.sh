@@ -54,6 +54,80 @@ CMD="${1:-help}"
 
 dc() { docker compose "$@"; }
 
+# ── Port availability check ──────────────────────────────────────────────────
+# Returns 0 if port is free on all interfaces, 1 if in use.
+check_port_free() {
+  local port="$1" proto="${2:-tcp}"
+  ss -Hlpn "sport = :$port" 2>/dev/null | grep -q ":$port" && return 1
+  return 0
+}
+
+# ── PowerDNS port-53 conflict handler ────────────────────────────────────────
+# Detects if port 53 is already in use and offers remediation.
+# Sets SKIP_POWERDNS=1 if the user chooses to skip PowerDNS.
+handle_powerdns_port() {
+  SKIP_POWERDNS=0
+  check_port_free 53 tcp && check_port_free 53 udp && return 0
+
+  local blocker
+  blocker=$(ss -tlnpH 'sport = 53' 2>/dev/null \
+    | grep -oP 'users:\(\("\K[^")]+' | head -1 || echo "unknown process")
+
+  warn "Port 53 (UDP+TCP) is already in use by: ${blocker}"
+  warn "This prevents PowerDNS from starting."
+  echo ""
+
+  if echo "$blocker" | grep -qi "systemd-resolve"; then
+    echo "  systemd-resolved's DNSStubListener uses port 53. Options:"
+    echo "    1) Disable stub listener  → frees port 53 for PowerDNS"
+    echo "    2) Skip PowerDNS          → DNS management unavailable"
+    echo "    3) Abort"
+    echo ""
+    read -rp "  Choose [1/2/3] (default: 2): " DNS_CHOICE
+    DNS_CHOICE="${DNS_CHOICE:-2}"
+
+    case "$DNS_CHOICE" in
+      1)
+        info "Disabling systemd-resolved DNSStubListener..."
+        if grep -q "^DNSStubListener=" /etc/systemd/resolved.conf 2>/dev/null; then
+          sed -i 's/^DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
+        else
+          echo "DNSStubListener=no" >> /etc/systemd/resolved.conf
+        fi
+        systemctl restart systemd-resolved
+        # Fall back to public DNS for host resolution
+        [[ -f /etc/resolv.conf ]] && chattr -i /etc/resolv.conf 2>/dev/null || true
+        echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
+        chattr +i /etc/resolv.conf 2>/dev/null || true
+        ok "systemd-resolved reconfigured. Port 53 is free."
+        ;;
+      2)
+        warn "Skipping PowerDNS. To enable later, free port 53 and start the container."
+        SKIP_POWERDNS=1
+        ;;
+      3)
+        die "Installation aborted by user"
+        ;;
+    esac
+  else
+    echo "  Port 53 is held by '${blocker}' (not systemd-resolved)."
+    echo "  Free port 53 or skip PowerDNS."
+    echo ""
+    read -rp "  Skip PowerDNS and continue? [Y/n]: " SKIP_CONFIRM
+    SKIP_CONFIRM="${SKIP_CONFIRM:-Y}"
+    if [[ "$SKIP_CONFIRM" =~ ^[Yy]$ ]]; then
+      warn "Skipping PowerDNS."
+      SKIP_POWERDNS=1
+    else
+      die "Aborted. Free port 53 and re-run: bash setup.sh install"
+    fi
+  fi
+}
+
+apply_port_fixes() {
+  handle_powerdns_port
+}
+
 require_root() {
   [[ "$EUID" -eq 0 ]] || die "This command must be run as root (sudo bash setup.sh $CMD)"
 }
@@ -243,7 +317,7 @@ UNIT
   PANEL_UID=999
   PANEL_GID=999
   # Docker socket GID — webpanel container uses group_add to gain access.
-  DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 984)
+  export DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 984)
 
   step "Step 3 / 8 — System users & groups"
 
@@ -355,6 +429,7 @@ UNIT
     CONTAINER_TOKEN_VAL=$(gen_secret)
     MYSQL_ROOT_PASS=$(gen_secret | head -c 32)
     MYSQL_PASS=$(gen_secret | head -c 32)
+    POSTGRES_PASS=$(gen_secret | head -c 32)
     REDIS_PASS=$(gen_secret | head -c 32)
     PDNS_KEY=$(gen_secret | head -c 64)
     GRAFANA_PASS=$(gen_secret | head -c 20)
@@ -375,8 +450,14 @@ DEBUG_LEVEL=0
 MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASS}
 MYSQL_PASSWORD=${MYSQL_PASS}
 
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+POSTGRES_PASSWORD=${POSTGRES_PASS}
+
 # ── Redis ────────────────────────────────────────────────────────────────────
 REDIS_PASSWORD=${REDIS_PASS}
+
+# ── Docker socket GID (for panel API to access Docker daemon) ────────────────
+DOCKER_SOCK_GID=${DOCKER_SOCK_GID:-984}
 
 # ── PowerDNS ─────────────────────────────────────────────────────────────────
 PDNS_API_KEY=${PDNS_KEY}
@@ -465,8 +546,16 @@ EOF
 
   step "Step 8 / 8 — Start services & create admin account"
 
+  apply_port_fixes
+
   info "Starting all services..."
   dc up -d --remove-orphans
+
+  if [[ "$SKIP_POWERDNS" -eq 1 ]]; then
+    docker stop webpanel_powerdns 2>/dev/null || true
+    warn "PowerDNS container stopped (port 53 conflict)"
+  fi
+
   ok "Services started"
 
   wait_healthy webpanel_mysql 120 || true
@@ -483,8 +572,9 @@ EOF
   [[ "$ADMIN_PASS" == "$ADMIN_PASS2" ]] || die "Passwords do not match"
   echo -e "${DIM}  ─────────────────────────────────────────────────────────${NC}\n"
 
-  dc exec -T webpanel python3 - <<PYEOF
-import asyncio, sys
+  GNK_UNAME="${ADMIN_USER}" GNK_UEMAIL="${ADMIN_EMAIL}" GNK_UPASS="${ADMIN_PASS}" \
+  dc exec -T -e GNK_UNAME -e GNK_UEMAIL -e GNK_UPASS webpanel python3 - <<'PYEOF'
+import asyncio, sys, os
 sys.path.insert(0, '/app')
 from app.database import init_db, AsyncSessionLocal
 from app.models.user import User, Role
@@ -492,18 +582,21 @@ from app.auth import hash_password
 from sqlalchemy import select
 
 async def main():
+    uname = os.environ['GNK_UNAME']
+    uemail = os.environ['GNK_UEMAIL']
+    upass = os.environ['GNK_UPASS']
     await init_db()
     async with AsyncSessionLocal() as db:
-        existing = (await db.execute(select(User).where(User.username == '${ADMIN_USER}'))).scalar_one_or_none()
+        existing = (await db.execute(select(User).where(User.username == uname))).scalar_one_or_none()
         if existing:
-            existing.hashed_password = hash_password('${ADMIN_PASS}')
+            existing.hashed_password = hash_password(upass)
             existing.role = Role.superadmin
             existing.is_active = True
         else:
             db.add(User(
-                username='${ADMIN_USER}',
-                email='${ADMIN_EMAIL}',
-                hashed_password=hash_password('${ADMIN_PASS}'),
+                username=uname,
+                email=uemail,
+                hashed_password=hash_password(upass),
                 role=Role.superadmin,
                 is_active=True,
             ))
@@ -547,8 +640,16 @@ PYEOF
 
 cmd_start() {
   require_env
+  apply_port_fixes
+  export DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 984)
   info "Starting GnuKontrolR..."
   dc up -d
+
+  if [[ "$SKIP_POWERDNS" -eq 1 ]]; then
+    docker stop webpanel_powerdns 2>/dev/null || true
+    warn "PowerDNS container stopped (port 53 conflict)"
+  fi
+
   ok "All services running"
   cmd_status
 }
@@ -561,10 +662,18 @@ cmd_stop() {
 
 cmd_restart() {
   require_env
+  apply_port_fixes
+  export DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 984)
   info "Applying config changes and restarting services..."
   # Use 'up -d' rather than 'restart' so compose detects any config/env changes
   # and recreates only the containers whose config changed.
   dc up -d --remove-orphans
+
+  if [[ "$SKIP_POWERDNS" -eq 1 ]]; then
+    docker stop webpanel_powerdns 2>/dev/null || true
+    warn "PowerDNS container stopped (port 53 conflict)"
+  fi
+
   ok "Services up-to-date"
   cmd_status
 }
@@ -616,6 +725,7 @@ cmd_repair() {
   step "Repair — host directories & permissions"
 
   PANEL_UID=999; PANEL_GID=999
+  export DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 984)
 
   declare -a REPAIR_DIRS=(
     "/var/webpanel:root:root:755"
@@ -811,8 +921,9 @@ cmd_backup() {
   mkdir -p "$BACKUP_DIR"
 
   info "Backing up MySQL..."
-  dc exec -T mysql mysqldump \
-    -u root -p"$(grep MYSQL_ROOT_PASSWORD .env | cut -d= -f2)" \
+  MYSQL_ROOT_PASSWORD="$(grep ^MYSQL_ROOT_PASSWORD= .env | cut -d= -f2-)"
+  MYSQL_PWD="$MYSQL_ROOT_PASSWORD" dc exec -T mysql mysqldump \
+    -u root \
     --all-databases --single-transaction 2>/dev/null \
     > "$BACKUP_DIR/mysql_all.sql"
 
@@ -833,6 +944,8 @@ cmd_restore() {
     echo "Available backups:"
     ls -1 "$INSTALL_DIR/backups/" 2>/dev/null || die "No backups found"
     read -rp "Enter backup folder name: " BACKUP_DIR
+    # Sanitize: strip leading path components, dots, and slashes
+    BACKUP_DIR="$(basename "$BACKUP_DIR")"
     BACKUP_DIR="$INSTALL_DIR/backups/$BACKUP_DIR"
   fi
   [[ -f "$BACKUP_DIR/mysql_all.sql" ]] || die "No mysql_all.sql in $BACKUP_DIR"
@@ -842,8 +955,9 @@ cmd_restore() {
   [[ "$CONFIRM" =~ ^[Yy]$ ]] || { info "Aborted"; exit 0; }
 
   info "Restoring MySQL..."
-  dc exec -T mysql mysql \
-    -u root -p"$(grep MYSQL_ROOT_PASSWORD .env | cut -d= -f2)" \
+  MYSQL_ROOT_PASSWORD="$(grep ^MYSQL_ROOT_PASSWORD= .env | cut -d= -f2-)"
+  MYSQL_PWD="$MYSQL_ROOT_PASSWORD" dc exec -T mysql mysql \
+    -u root \
     < "$BACKUP_DIR/mysql_all.sql"
 
   ok "Restore complete"
