@@ -78,6 +78,7 @@ const NAV_GROUPS = [
       { to: '/notifications', icon: Bell,     label: 'Notifications', adminOnly: true },
       { to: '/users',         icon: Users,    label: 'Users',         adminOnly: true },
       { to: '/crons',         icon: Clock,    label: 'Cron Jobs'      },
+      { to: '/plans',         icon: Package,  label: 'Hosting Plans'   },
       { to: '/settings',      icon: Settings, label: 'Settings'       },
     ],
   },
@@ -93,6 +94,7 @@ const ROUTE_LABELS = {
   '/diagnostic': 'Diagnostic', '/notifications': 'Notifications',
   '/networking': 'Networking', '/ai-containers': 'AI Containers',
   '/crons': 'Cron Jobs',
+  '/plans': 'Hosting Plans',
 };
 
 // ── NavItem — full or icon-only ───────────────────────────────────────────────

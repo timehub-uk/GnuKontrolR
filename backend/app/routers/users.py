@@ -7,6 +7,7 @@ from typing import Optional
 
 from app.database import get_db
 from app.models.user import User, Role
+from app.models.hosting_plan import HostingPlan
 from app.auth import require_admin, hash_password, get_current_user
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -41,13 +42,20 @@ class ProfileUpdate(BaseModel):
 async def list_users(db: AsyncSession = Depends(get_db), _=Depends(require_admin)):
     result = await db.execute(select(User).order_by(User.id))
     users = result.scalars().all()
+    # Bulk-load plans for all users
+    plan_ids = {u.plan_id for u in users if u.plan_id is not None}
+    plans = {}
+    if plan_ids:
+        p_result = await db.execute(select(HostingPlan).where(HostingPlan.id.in_(plan_ids)))
+        plans = {p.id: p for p in p_result.scalars().all()}
     return [
         {
             "id": u.id, "username": u.username, "email": u.email,
             "full_name": u.full_name, "role": u.role,
             "is_active": u.is_active, "is_suspended": u.is_suspended,
             "created_at": u.created_at, "disk_quota_mb": u.disk_quota_mb,
-            "max_domains": u.max_domains,
+            "max_domains": u.max_domains, "plan_id": u.plan_id,
+            "plan_name": plans[u.plan_id].name if u.plan_id in plans else None,
         }
         for u in users
     ]
@@ -72,6 +80,8 @@ async def get_user(user_id: int, db: AsyncSession = Depends(get_db), _=Depends(r
         "bw_quota_mb": user.bw_quota_mb,
         "max_databases": user.max_databases,
         "max_emails": user.max_emails,
+        "plan_id": user.plan_id,
+        "plan_name": user.plan.name if user.plan else None,
         "created_at": user.created_at,
         "updated_at": user.updated_at,
         "company": user.company,

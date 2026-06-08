@@ -1,6 +1,6 @@
 """User model."""
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SAEnum
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SAEnum, ForeignKey
 from sqlalchemy.orm import relationship
 import enum
 from app.database import Base
@@ -47,7 +47,11 @@ class User(Base):
     max_databases  = Column(Integer, default=5)
     max_emails     = Column(Integer, default=20)
 
+    # Hosting plan
+    plan_id = Column(Integer, ForeignKey("hosting_plans.id"), nullable=True, default=None)
+
     # Superadmin support PIN (bcrypt hash of 6-digit numeric PIN)
     support_pin_hash = Column(String(256), nullable=True, default=None)
 
     domains   = relationship("Domain", back_populates="owner", cascade="all, delete-orphan")
+    plan      = relationship("HostingPlan", foreign_keys=[plan_id])

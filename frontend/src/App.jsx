@@ -32,6 +32,7 @@ import NotificationsPage from './pages/NotificationsPage';
 import NetworkingPage      from './pages/NetworkingPage';
 import AiContainersPage   from './pages/AiContainersPage';
 import CronsPage          from './pages/CronsPage';
+import PlansPage          from './pages/PlansPage';
 
 const pageTransition = {
   initial:    { opacity: 0, y: 8 },
@@ -78,6 +79,7 @@ function AnimatedRoutes() {
         <Route path="/networking"      element={<Pg><NetworkingPage /></Pg>} />
         <Route path="/ai-containers"   element={<Pg><AiContainersPage /></Pg>} />
         <Route path="/crons"          element={<Pg><CronsPage /></Pg>} />
+        <Route path="/plans"          element={<Pg><PlansPage /></Pg>} />
       </Routes>
     </AnimatePresence>
   );
