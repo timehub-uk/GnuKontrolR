@@ -6,7 +6,7 @@ import {
   FolderOpen, Database, Mail, ShieldCheck, ScrollText,
   HardDrive, Terminal, Settings, LogOut,
   Package, Eye, Activity, Shield, ChevronRight, ChevronLeft, Cpu,
-  LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit, Stethoscope, Bell, Network, Bot,
+  LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit, Stethoscope, Bell, Network, Bot, Clock,
 } from 'lucide-react';
 import AiPanel from './AiPanel';
 import CommandPalette from './CommandPalette';
@@ -77,6 +77,7 @@ const NAV_GROUPS = [
     items: [
       { to: '/notifications', icon: Bell,     label: 'Notifications', adminOnly: true },
       { to: '/users',         icon: Users,    label: 'Users',         adminOnly: true },
+      { to: '/crons',         icon: Clock,    label: 'Cron Jobs'      },
       { to: '/settings',      icon: Settings, label: 'Settings'       },
     ],
   },
@@ -91,6 +92,7 @@ const ROUTE_LABELS = {
   '/users': 'Users', '/settings': 'Settings', '/ai-admin': 'AI Admin',
   '/diagnostic': 'Diagnostic', '/notifications': 'Notifications',
   '/networking': 'Networking', '/ai-containers': 'AI Containers',
+  '/crons': 'Cron Jobs',
 };
 
 // ── NavItem — full or icon-only ───────────────────────────────────────────────
