@@ -8,7 +8,6 @@ import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
@@ -149,11 +148,6 @@ app = FastAPI(
 )
 
 _IS_PRODUCTION = os.environ.get("ENVIRONMENT", "development").lower() == "production"
-
-# Force HTTPS in production (Traefik handles TLS termination; this redirect
-# catches any direct HTTP reaches that bypass Traefik)
-if _IS_PRODUCTION:
-    app.add_middleware(HTTPSRedirectMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

@@ -264,6 +264,7 @@ services:
       - SECRET_KEY=${SECRET_KEY:-change_me_in_production}
       - SERVER_IP=${SERVER_IP}
       - PANEL_DOMAIN=${PANEL_DOMAIN}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
       - DKIM_KEYS_DIR=/etc/opendkim/keys
       - MYSQL_HOST=mysql
       - MYSQL_PASSWORD=${MYSQL_PASSWORD:-changeme_mysql}
@@ -284,7 +285,15 @@ services:
         condition: service_started
     labels:
       - traefik.enable=true
+      # Catch-all router for frontend SPA + any non-API paths
+      - traefik.http.routers.webpanel.rule=Host(`${PANEL_DOMAIN}`)
+      - traefik.http.routers.webpanel.tls=true
+      - traefik.http.routers.webpanel.tls.certresolver=le
+      - traefik.http.services.webpanel.loadbalancer.server.port=8000
+      # API-specific router (higher priority due to longer rule)
       - traefik.http.routers.webpanel-api.rule=Host(`${PANEL_DOMAIN}`) && PathPrefix(`/api`)
+      - traefik.http.routers.webpanel-api.tls=true
+      - traefik.http.routers.webpanel-api.tls.certresolver=le
       - traefik.http.services.webpanel-api.loadbalancer.server.port=8000
 
   # ── Prometheus ─────────────────────────────────────────────────────────────
@@ -325,6 +334,8 @@ services:
     labels:
       - traefik.enable=true
       - traefik.http.routers.grafana.rule=Host(`${PANEL_DOMAIN}`) && PathPrefix(`/grafana`)
+      - traefik.http.routers.grafana.tls=true
+      - traefik.http.routers.grafana.tls.certresolver=le
       - traefik.http.services.grafana.loadbalancer.server.port=3000
 
   # ── Node Exporter (host metrics for Prometheus) ────────────────────────────
