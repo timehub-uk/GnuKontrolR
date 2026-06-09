@@ -100,14 +100,15 @@ ALLOWED_COMMANDS = {
     "reload_apache":   ["supervisorctl", "restart", "apache2"],
 }
 
-
 # ── Auth ──────────────────────────────────────────────────────────────────────
+_seen_nonces: set[str] = set()
+
 
 def _verify_token():
-    """Verify Bearer token + enforce rate limit."""
+    """Verify Bearer token + HMAC request signature + enforce rate limit."""
     _check_rate(request.remote_addr or "unknown")
     if not API_TOKEN:
-        return  # Dev mode — warn only; should never reach production
+        return
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         log.warning("Missing Authorization header from %s", request.remote_addr)
@@ -116,6 +117,30 @@ def _verify_token():
     if not hmac.compare_digest(provided.encode(), API_TOKEN.encode()):
         log.warning("Bad token from %s", request.remote_addr)
         abort(403)
+    req_id = request.headers.get("X-Request-Id", "")
+    sig = request.headers.get("X-Signature", "")
+    if req_id and sig:
+        if req_id in _seen_nonces:
+            log.warning("Replayed nonce from %s", request.remote_addr)
+            abort(403)
+        _seen_nonces.add(req_id)
+        body = request.get_data()
+        msg = request.method.encode() + b"|" + request.path.encode() + b"|" + req_id.encode() + b"|" + body
+        expected = hmac.new(API_TOKEN.encode(), msg, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            log.warning("Bad request signature from %s", request.remote_addr)
+            abort(403)
+
+
+@app.after_request
+def _sign_response(response):
+    """Sign the response with the request's nonce for MITM detection."""
+    req_id = request.headers.get("X-Request-Id", "")
+    if req_id and API_TOKEN:
+        body = response.get_data()
+        sig = hmac.new(API_TOKEN.encode(), req_id.encode() + b"|" + body, hashlib.sha256).hexdigest()
+        response.headers["X-Response-Signature"] = sig
+    return response
 
 
 @app.before_request
