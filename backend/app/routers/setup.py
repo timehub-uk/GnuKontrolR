@@ -188,6 +188,27 @@ async def cron_status(
     return {"enabled": has_block, "entries": entries}
 
 
+@router.post("/reset")
+async def reset_setup(
+    db: AsyncSession = Depends(get_db),
+    current: User = Depends(require_superadmin),
+):
+    """Reset the setup wizard to uncompleted state so it shows again."""
+    state = await _get_or_create_state(db)
+    state.completed = False
+    state.step_index = 0
+    state.secrets_changed = False
+    state.fail2ban_done = False
+    state.geo_block_done = False
+    state.grafana_done = False
+    state.backup_cron_set = False
+    state.cve_cron_set = False
+    state.update_cron_set = False
+    state.services_pruned = False
+    await db.commit()
+    return {"ok": True, "message": "Setup wizard reset. It will show again on next page load."}
+
+
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")
 
 
