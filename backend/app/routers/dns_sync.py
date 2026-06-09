@@ -67,9 +67,7 @@ _last_ip_check: dict = {}
 _last_known_ipv4: str = ""
 _last_known_ipv6: str = ""
 _last_known_internal: str = ""
-_ip_change_pending: str = ""        # candidate IP awaiting confirmation
-_ip_change_pending_count: int = 0   # consecutive times seen
-_IP_CHANGE_CONFIRM: int = 3         # confirm after N consecutive same readings
+_seen_ips: set[str] = set()  # IPs we've already notified about
 
 # Keep the old name so main.py still works without changes
 ns_ip_sync_loop = None   # replaced below by ip_check_loop; updated in main.py
@@ -129,27 +127,19 @@ async def ip_check_loop(interval: int = 60) -> None:
             internal = internal if isinstance(internal, str) else ""
 
             # Debounce external IPv4: only act after N consecutive identical readings.
-            # This prevents notifications from transient IP flips (CDN, LB, multi-A).
-            confirmed = False
-            if ipv4 and ipv4 != _last_known_ipv4:
-                if ipv4 == _ip_change_pending:
-                    _ip_change_pending_count += 1
-                    if _ip_change_pending_count >= _IP_CHANGE_CONFIRM:
-                        confirmed = True
-                else:
-                    _ip_change_pending = ipv4
-                    _ip_change_pending_count = 1
-            else:
-                _ip_change_pending = ""
-                _ip_change_pending_count = 0
-
+            # Detect any IP change
             changed = (
-                confirmed
-                or (ipv6 and ipv6 != _last_known_ipv6)
-                or (internal and internal != _last_known_internal)
+                (ipv4     and ipv4     != _last_known_ipv4)     or
+                (ipv6     and ipv6     != _last_known_ipv6)     or
+                (internal and internal != _last_known_internal)
             )
 
-            if changed:
+            # Only notify/sync for genuinely new IPs, not repeats
+            seen_before = ipv4 in _seen_ips
+
+            if changed and not seen_before:
+                if ipv4:
+                    _seen_ips.add(ipv4)
                 prev_ipv4 = _last_known_ipv4
                 log.info(
                     "IP change detected — ext4: %s→%s  ext6: %s→%s  internal: %s→%s",
@@ -169,11 +159,14 @@ async def ip_check_loop(interval: int = 60) -> None:
                 ns_summary  = await sync_all_ns(domains, ipv4, ipv6=ipv6)
                 dns_summary = await sync_all_domains(domains, server_ip=ipv4)
 
+                errors = ns_summary.get("errors", []) + dns_summary.get("errors", [])
+
+                _seen_ips.add(prev_ipv4) if prev_ipv4 else None
+
+
                 _last_known_ipv4     = ipv4
                 _last_known_ipv6     = ipv6
                 _last_known_internal = internal
-
-                errors = ns_summary.get("errors", []) + dns_summary.get("errors", [])
                 _last_ip_check.clear()
                 _last_ip_check.update({
                     "external_ipv4": ipv4,
