@@ -8,6 +8,7 @@ import {
   Package, Eye, Activity, Shield, ChevronRight, ChevronLeft, Cpu,
   LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit, Stethoscope, Bell, Network, Bot, Clock,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import AiPanel from './AiPanel';
 import CommandPalette from './CommandPalette';
 import SetupWizard from './SetupWizard';
@@ -161,15 +162,30 @@ export default function Layout({ children }) {
     historyDepth.current += 1;
   }, [location.pathname]);
 
-  // Poll unread notification count every 30 s (admin only)
+  // Poll unread notification count every 30 s (admin only) and toast new ones
   const isAdmin = ['superadmin', 'admin'].includes(user?.role);
+  const prevCount = useRef(0);
   const fetchUnread = useCallback(async () => {
     if (!isAdmin) return;
     try {
       const { data } = await api.get('/api/notifications/unread-count');
-      setUnreadCount(data.count ?? 0);
+      const count = data.count ?? 0;
+      const prev = prevCount.current;
+      prevCount.current = count;
+      if (count > prev && prev > 0) {
+        const { data: notes } = await api.get('/api/notifications');
+        const latest = Array.isArray(notes) ? notes[0] : null;
+        if (latest && !latest.is_read) {
+          toast(latest.title || 'New notification', {
+            description: latest.message,
+            duration: 5000,
+            action: { label: 'View', onClick: () => navigate('/notifications') },
+          });
+        }
+      }
+      setUnreadCount(count);
     } catch { /* non-fatal */ }
-  }, [isAdmin]);
+  }, [isAdmin, navigate]);
 
   useEffect(() => {
     fetchUnread();
