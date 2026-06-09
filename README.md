@@ -212,6 +212,4 @@ GnuKontrolR/
 
 ---
 
-## License
 
-MIT
