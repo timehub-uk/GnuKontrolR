@@ -276,15 +276,32 @@ const APP_LOGOS = {
 
 function randPass(n = 20) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$';
-  return Array.from(crypto.getRandomValues(new Uint8Array(n)))
-    .map(b => chars[b % chars.length]).join('');
+  const max = 256 - (256 % chars.length);
+  const buf = new Uint8Array(n);
+  const out = new Array(n);
+  let i = 0;
+  while (i < n) {
+    crypto.getRandomValues(buf);
+    for (let j = 0; j < n && i < n; j++) {
+      if (buf[j] < max) out[i++] = chars[buf[j] % chars.length];
+    }
+  }
+  return out.join('');
 }
 
 function randIdent(prefix, n = 8) {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  const suffix = Array.from(crypto.getRandomValues(new Uint8Array(n)))
-    .map(b => chars[b % chars.length]).join('');
-  return `${prefix}_${suffix}`;
+  const max = 256 - (256 % chars.length);
+  const buf = new Uint8Array(n);
+  const out = new Array(n);
+  let i = 0;
+  while (i < n) {
+    crypto.getRandomValues(buf);
+    for (let j = 0; j < n && i < n; j++) {
+      if (buf[j] < max) out[i++] = chars[buf[j] % chars.length];
+    }
+  }
+  return `${prefix}_${out.join('')}`;
 }
 
 // ── Small UI atoms ─────────────────────────────────────────────────────────────

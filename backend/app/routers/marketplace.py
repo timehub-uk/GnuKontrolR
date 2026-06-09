@@ -917,8 +917,9 @@ async def apply_template(req: ApplyTemplateRequest, user=Depends(get_current_use
 
 def _get_token(domain: str) -> str:
     """Retrieve the container API token for a domain."""
-    import os, pathlib
-    token_file = pathlib.Path(f"/var/tokens/{domain}.token")
+    import os, pathlib, re
+    safe_domain = re.sub(r'[^a-zA-Z0-9_.-]', '_', domain)
+    token_file = pathlib.Path(f"/var/tokens/{safe_domain}.token")
     if token_file.exists():
         return token_file.read_text().strip()
     return os.environ.get("CONTAINER_API_TOKEN", "")

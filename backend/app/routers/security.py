@@ -91,8 +91,30 @@ async def _check_container_running(domain: str) -> dict:
                 "message": str(e)}
 
 
+def _is_safe_domain(domain: str) -> bool:
+    """Reject SSRF — only allow public DNS names, no IPs or internal hosts."""
+    if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$', domain):
+        return False
+    if domain.endswith('.local') or domain.endswith('.internal') or 'localhost' in domain.lower():
+        return False
+    try:
+        import ipaddress
+        addrs = socket.getaddrinfo(domain, 80)
+        for family, type_, proto, canonname, sockaddr in addrs:
+            ip = sockaddr[0]
+            addr = ipaddress.ip_address(ip)
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_unspecified:
+                return False
+    except Exception:
+        pass
+    return True
+
+
 async def _check_http_headers(domain: str) -> list[dict]:
     """Check for security HTTP headers."""
+    if not _is_safe_domain(domain):
+        return [{"id": "header_ssrf_blocked", "severity": "medium", "title": "SSRF Blocked",
+                 "message": f"Refused to check headers for {domain}: not a public domain"}]
     checks = []
     try:
         import httpx

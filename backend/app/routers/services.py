@@ -5,6 +5,7 @@ inside their domain container: Nginx, Apache, Lighttpd, Node.js,
 Laravel, WordPress, Django, etc.
 """
 import json
+import re
 import subprocess
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
@@ -154,7 +155,8 @@ CATALOGUE: dict[str, dict] = {
 # ────────────────────────────────────────────────────────────────────────────
 
 def _container_name(domain: str) -> str:
-    return "site_" + domain.replace(".", "_").replace("-", "_")
+    safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', domain)
+    return "site_" + safe.replace(".", "_").replace("-", "_")
 
 
 def _run_in_container(domain: str, cmd: list[str], timeout: int = 120) -> tuple[int, str, str]:

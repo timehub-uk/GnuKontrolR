@@ -3,6 +3,7 @@ import asyncio
 import os
 import random
 import secrets
+import re
 import socket
 import subprocess
 import json
@@ -121,7 +122,8 @@ def _port_is_free(port: int) -> bool:
 
 
 def container_name(domain: str) -> str:
-    return "site_" + domain.replace(".", "_").replace("-", "_")
+    safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', domain)
+    return "site_" + safe.replace(".", "_").replace("-", "_")
 
 
 def resolve_container(name_or_domain: str) -> str:
