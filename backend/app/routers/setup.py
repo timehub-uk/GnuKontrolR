@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import secrets
 from pathlib import Path
 from datetime import datetime
 
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.setup import SetupState
 from app.models.user import User
-from app.auth import get_current_user, require_superadmin
+from app.auth import get_current_user, require_superadmin, hash_password
 
 log = logging.getLogger("webpanel")
 
@@ -185,3 +186,78 @@ async def cron_status(
             if in_block and line.strip() and not line.startswith("#"):
                 entries.append(line.strip())
     return {"enabled": has_block, "entries": entries}
+
+
+_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")
+
+
+def _read_env() -> dict[str, str]:
+    env: dict[str, str] = {}
+    try:
+        with open(_ENV_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if line and "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    env[k.strip()] = v.strip()
+    except FileNotFoundError:
+        pass
+    return env
+
+
+def _write_env(env: dict[str, str]) -> None:
+    lines: list[str] = []
+    seen: set[str] = set()
+    try:
+        with open(_ENV_PATH) as f:
+            for line_raw in f:
+                stripped = line_raw.strip()
+                if stripped and "=" in stripped and not stripped.startswith("#"):
+                    k = stripped.split("=", 1)[0].strip()
+                    if k in env:
+                        lines.append(f"{k}={env[k]}\n")
+                        seen.add(k)
+                    else:
+                        lines.append(line_raw)
+                else:
+                    lines.append(line_raw)
+        for k, v in env.items():
+            if k not in seen:
+                lines.append(f"{k}={v}\n")
+        with open(_ENV_PATH, "w") as f:
+            f.writelines(lines)
+    except FileNotFoundError:
+        with open(_ENV_PATH, "w") as f:
+            for k, v in env.items():
+                f.write(f"{k}={v}\n")
+
+
+@router.post("/rotate-secrets")
+async def rotate_secrets(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current: User = Depends(require_superadmin),
+):
+    """Generate a new SECRET_KEY and/or change the admin password."""
+    new_key = body.get("new_secret_key") or secrets.token_urlsafe(48)
+    new_password = body.get("new_password")
+
+    env = _read_env()
+    env["SECRET_KEY"] = new_key
+    _write_env(env)
+
+    result = {}
+    if new_password:
+        current.hashed_password = hash_password(new_password)
+        await db.commit()
+        result["password_updated"] = True
+
+    # Reload env so the running process picks up the new key
+    os.environ["SECRET_KEY"] = new_key
+
+    return {
+        "secret_key_updated": True,
+        "new_secret_key": new_key,
+        "password_updated": bool(new_password),
+        "restart_required": True,
+    }

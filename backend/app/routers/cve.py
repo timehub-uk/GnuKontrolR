@@ -95,6 +95,8 @@ async def recent_cves(
             r = await client.get(_NVD_API_BASE, params=params)
             r.raise_for_status()
             data = r.json()
+            if not data or not isinstance(data, dict):
+                raise HTTPException(502, "NVD API returned an empty or unexpected response")
     except httpx.TimeoutException:
         raise HTTPException(504, "NVD API timed out")
     except httpx.HTTPStatusError as e:
@@ -103,7 +105,7 @@ async def recent_cves(
         raise HTTPException(502, f"CVE feed unavailable: {exc}")
 
     items = []
-    for vuln in data.get("vulnerabilities", []):
+    for vuln in (data.get("vulnerabilities") or []):
         cve = vuln.get("cve", {})
         cve_id   = cve.get("id", "")
         published = cve.get("published", "")
