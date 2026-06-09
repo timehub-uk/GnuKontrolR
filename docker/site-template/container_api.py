@@ -146,6 +146,10 @@ def _safe(base: Path, rel: str) -> Path:
     return target
 
 
+def _safe_name(s: str, pattern: str = r'[^a-zA-Z0-9._-]') -> str:
+    return re.sub(pattern, '', s)
+
+
 def _dir_listing(directory: Path, rel: str = "") -> dict:
     entries = []
     for item in sorted(directory.iterdir()):
@@ -316,8 +320,11 @@ def upload_public_file():
         scan_result = "scan_timeout"
 
     # Move to destination + fix ownership
-    shutil.move(tmp_path, str(dest))
-    shutil.chown(str(dest), "www-data", "www-data")
+    dest_resolved = dest.resolve()
+    if not str(dest_resolved).startswith(str(PUBLIC_ROOT.resolve())):
+        abort(400)
+    shutil.move(tmp_path, str(dest_resolved))
+    shutil.chown(str(dest_resolved), "www-data", "www-data")
 
     return jsonify({
         "ok":       True,
@@ -360,10 +367,13 @@ AREA_DIRS = {
 
 def _backup_file(filepath: Path):
     """Snapshot filepath into .backups/{area}/{filename}/, keeping BACKUP_KEEP versions."""
-    if not filepath.exists():
+    resolved = filepath.resolve()
+    if not str(resolved).startswith(str(SECURE_ROOT.resolve())):
+        abort(400)
+    if not resolved.exists():
         return
-    area = filepath.parent.name          # nginx / php / env / ssl
-    snap_dir = CONFIG_BACKUPS_ROOT / area / filepath.name
+    area = resolved.parent.name          # nginx / php / env / ssl
+    snap_dir = CONFIG_BACKUPS_ROOT / area / resolved.name
     snap_dir.mkdir(parents=True, exist_ok=True)
     ts   = str(int(time.time()))
     dest = snap_dir / f"{ts}.bak"
@@ -411,16 +421,19 @@ def restore_backup(area: str):
     if area not in AREA_DIRS:
         abort(400)
     body     = request.json or {}
-    filename = re.sub(r"[^a-zA-Z0-9._-]", "", body.get("filename", ""))
-    ts_raw   = re.sub(r"[^0-9]",          "", str(body.get("ts", "")))
+    filename = _safe_name(body.get("filename", ""))
+    ts_raw   = _safe_name(str(body.get("ts", "")), r'[^0-9]')
     if not filename or not ts_raw:
         abort(400)
     snap = CONFIG_BACKUPS_ROOT / area / filename / f"{ts_raw}.bak"
-    if not snap.exists():
+    snap_resolved = snap.resolve()
+    if not str(snap_resolved).startswith(str(CONFIG_BACKUPS_ROOT.resolve())):
+        abort(400)
+    if not snap_resolved.exists():
         abort(404)
     target = AREA_DIRS[area] / filename
     _backup_file(target)   # snapshot current before overwriting
-    shutil.copy2(str(snap), str(target))
+    shutil.copy2(str(snap_resolved), str(target))
     # Reload affected service
     if area == "nginx":
         subprocess.run(["supervisorctl", "restart", "nginx"],   timeout=10)
@@ -480,7 +493,7 @@ def set_nginx_config():
     """Write a named nginx config fragment to the secure nginx dir."""
     _verify_token()
     body = request.json or {}
-    name    = re.sub(r"[^a-z0-9_-]", "", body.get("name", "custom"))
+    name    = _safe_name(body.get("name", "custom"), r'[^a-z0-9_-]')
     content = body.get("content", "")
     conf_file = NGINX_CONF_DIR / f"{name}.conf"
     old_content = conf_file.read_text() if conf_file.exists() else None
@@ -2425,9 +2438,13 @@ def site_backup_create():
                 log.warning("mysqldump failed: %s", result.stderr.decode()[:200])
 
         # Build tar.gz
-        cmd = ["tar", "-czf", str(dest)]
+        dest_resolved = dest.resolve()
+        if not str(dest_resolved).startswith(str(BACKUPS_DIR.resolve())):
+            abort(400)
+        cmd = ["tar", "-czf", str(dest_resolved)]
         for label, path_str in parts:
-            cmd += ["-C", str(Path(path_str).parent), Path(path_str).name]
+            p = Path(path_str).resolve()
+            cmd += ["-C", str(p.parent), p.name]
         subprocess.run(cmd, check=True, timeout=300)
 
     # Prune old backups
@@ -2435,7 +2452,7 @@ def site_backup_create():
     while len(all_backups) > SITE_BACKUP_MAX:
         all_backups.pop(0).unlink(missing_ok=True)
 
-    stat = dest.stat()
+    stat = dest_resolved.stat()
     return jsonify({"ok": True, "filename": filename, "size": stat.st_size})
 
 
@@ -2547,7 +2564,8 @@ def scanner_quarantine():
         return jsonify({"error": "File not found"}), 404
 
     QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
-    dest = QUARANTINE_DIR / f"{area}__{rel_path.replace('/', '__')}_{int(time.time())}"
+    safe_rel = _safe_name(rel_path.replace('/', '__'))
+    dest = QUARANTINE_DIR / f"{area}__{safe_rel}_{int(time.time())}"
     shutil.move(str(src), str(dest))
     log.warning("QUARANTINE: moved %s → %s", src, dest)
     return jsonify({"ok": True, "quarantined_to": str(dest)})
