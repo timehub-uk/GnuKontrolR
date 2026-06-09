@@ -67,6 +67,9 @@ _last_ip_check: dict = {}
 _last_known_ipv4: str = ""
 _last_known_ipv6: str = ""
 _last_known_internal: str = ""
+_ip_change_pending: str = ""        # candidate IP awaiting confirmation
+_ip_change_pending_count: int = 0   # consecutive times seen
+_IP_CHANGE_CONFIRM: int = 3         # confirm after N consecutive same readings
 
 # Keep the old name so main.py still works without changes
 ns_ip_sync_loop = None   # replaced below by ip_check_loop; updated in main.py
@@ -110,6 +113,7 @@ async def ip_check_loop(interval: int = 60) -> None:
       - Runs immediately on first iteration (no initial sleep).
     """
     global _last_known_ipv4, _last_known_ipv6, _last_known_internal
+    global _ip_change_pending, _ip_change_pending_count
 
     while True:
         try:
@@ -124,10 +128,25 @@ async def ip_check_loop(interval: int = 60) -> None:
             ipv6     = ipv6     if isinstance(ipv6, str)     else ""
             internal = internal if isinstance(internal, str) else ""
 
+            # Debounce external IPv4: only act after N consecutive identical readings.
+            # This prevents notifications from transient IP flips (CDN, LB, multi-A).
+            confirmed = False
+            if ipv4 and ipv4 != _last_known_ipv4:
+                if ipv4 == _ip_change_pending:
+                    _ip_change_pending_count += 1
+                    if _ip_change_pending_count >= _IP_CHANGE_CONFIRM:
+                        confirmed = True
+                else:
+                    _ip_change_pending = ipv4
+                    _ip_change_pending_count = 1
+            else:
+                _ip_change_pending = ""
+                _ip_change_pending_count = 0
+
             changed = (
-                (ipv4     and ipv4     != _last_known_ipv4)     or
-                (ipv6     and ipv6     != _last_known_ipv6)     or
-                (internal and internal != _last_known_internal)
+                confirmed
+                or (ipv6 and ipv6 != _last_known_ipv6)
+                or (internal and internal != _last_known_internal)
             )
 
             if changed:
