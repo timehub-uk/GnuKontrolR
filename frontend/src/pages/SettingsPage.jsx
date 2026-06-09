@@ -153,7 +153,7 @@ function OpenCodeRow({ connected, onRefresh }) {
     setDisconnecting(true);
     setMsg(null);
     try {
-      await api.delete('/api/ai/providers/opencode_account');
+      await api.delete('/api/ai/opencode-auth/logout');
       setAwaitingVerify(false);
       setMsg({ type: 'ok', text: 'Disconnected.' });
       onRefresh();

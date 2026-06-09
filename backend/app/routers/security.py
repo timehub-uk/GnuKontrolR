@@ -399,13 +399,15 @@ async def get_threats(_=Depends(get_current_user)):
             elif any(x in v.get("shortDescription", "").lower() for x in ["remote code", "rce", "unauthenticated"]):
                 severity = "CRITICAL"
             threats.append({
-                "id": v.get("cveID", ""),
-                "title": f"{vendor} {product} — {v.get('vulnerabilityName', '')}",
+                "cve_id": v.get("cveID", ""),
                 "severity": severity,
+                "vendor": vendor,
+                "product": product,
+                "name": v.get("vulnerabilityName", ""),
                 "date_added": v.get("dateAdded", ""),
                 "due_date": v.get("dueDate", ""),
-                "description": v.get("shortDescription", ""),
-                "ransomware_use": v.get("knownRansomwareCampaignUse", "Unknown"),
+                "notes": v.get("shortDescription", ""),
+                "ransomware": v.get("knownRansomwareCampaignUse", "Unknown"),
                 "nvd_url": f"https://nvd.nist.gov/vuln/detail/{v.get('cveID', '')}",
             })
         result = {"threats": threats, "count": len(data.get("vulnerabilities", [])),
