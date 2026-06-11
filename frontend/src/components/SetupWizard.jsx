@@ -132,7 +132,11 @@ function SecretsStep({ onDone, stepState, markStep }) {
 
   const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-';
 
-  const randomChar = () => chars[Math.floor(Math.random() * chars.length)];
+  const randomChar = () => {
+    const array = new Uint32Array(1);
+    window.crypto.getRandomValues(array);
+    return chars[array[0] % chars.length];
+  };
 
   const randomString = (len) => {
     let s = '';

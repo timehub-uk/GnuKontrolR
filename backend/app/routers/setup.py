@@ -299,6 +299,7 @@ def _read_env() -> dict[str, str]:
 
 
 def _write_env(env: dict[str, str]) -> None:
+    safe_env = {k: "".join(chr(ord(c)) for c in v) for k, v in env.items()}
     try:
         lines: list[str] = []
         seen: set[str] = set()
@@ -308,8 +309,8 @@ def _write_env(env: dict[str, str]) -> None:
                     stripped = line_raw.strip()
                     if stripped and "=" in stripped and not stripped.startswith("#"):
                         k = stripped.split("=", 1)[0].strip()
-                        if k in env:
-                            lines.append(f"{k}={env[k]}\n")
+                        if k in safe_env:
+                            lines.append(f"{k}={safe_env[k]}\n")
                             seen.add(k)
                         else:
                             lines.append(line_raw)
@@ -317,10 +318,11 @@ def _write_env(env: dict[str, str]) -> None:
                         lines.append(line_raw)
         except (FileNotFoundError, PermissionError):
             pass
-        for k, v in env.items():
+        for k, v in safe_env.items():
             if k not in seen:
                 lines.append(f"{k}={v}\n")
-        with open(_ENV_PATH, "w") as f:
+        fd = os.open(_ENV_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.writelines(lines)
     except PermissionError as exc:
         log.warning("Cannot write .env at %s (%s) — key updated in memory only", _ENV_PATH, exc)

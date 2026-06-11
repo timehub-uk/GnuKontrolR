@@ -77,9 +77,18 @@ def _decode_pin_token(token: str) -> dict:
 # ────────────────────────────────────────────────────────────────────────────
 
 def _safe_path(domain: str, rel: str = "") -> Path:
+    import re
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        raise HTTPException(400, "Invalid domain name")
+    if os.path.isabs(rel) or ".." in rel or rel.startswith("/"):
+        raise HTTPException(400, "Path traversal or invalid path detected")
     root = Path(SITES_ROOT).resolve()
     target = (root / domain / rel).resolve()
-    if not str(target).startswith(str(root)):
+    try:
+        common = os.path.commonpath([str(root), str(target)])
+        if common != str(root):
+            raise HTTPException(400, "Path traversal detected")
+    except ValueError:
         raise HTTPException(400, "Path traversal detected")
     return target
 

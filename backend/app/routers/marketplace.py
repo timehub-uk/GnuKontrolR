@@ -918,8 +918,17 @@ async def apply_template(req: ApplyTemplateRequest, user=Depends(get_current_use
 def _get_token(domain: str) -> str:
     """Retrieve the container API token for a domain."""
     import os, pathlib, re
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        raise ValueError("Invalid domain name")
     safe_domain = re.sub(r'[^a-zA-Z0-9_.-]', '_', domain)
-    token_file = pathlib.Path(f"/var/tokens/{safe_domain}.token")
+    base_dir = pathlib.Path("/var/tokens").resolve()
+    token_file = (base_dir / f"{safe_domain}.token").resolve()
+    try:
+        common = os.path.commonpath([str(base_dir), str(token_file)])
+        if common != str(base_dir):
+            raise ValueError("Path traversal detected")
+    except ValueError:
+        raise ValueError("Path traversal detected")
     if token_file.exists():
         return token_file.read_text().strip()
     return os.environ.get("CONTAINER_API_TOKEN", "")
@@ -1013,8 +1022,10 @@ def _cache_app(app_id: str) -> dict:
 
             return {"ok": True, "app_id": app_id, "filename": filename, "size_kb": size // 1024}
         except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Error caching app: %s", app_id)
             tmp.unlink(missing_ok=True)
-            return {"ok": False, "app_id": app_id, "error": str(exc)}
+            return {"ok": False, "app_id": app_id, "error": "Internal server error during app caching"}
 
 
 def _db_record_cached(app_id: str, url: str, canonical: str, versioned: str, size: int):

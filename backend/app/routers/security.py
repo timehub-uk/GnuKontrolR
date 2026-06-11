@@ -31,6 +31,7 @@ async def _check_ssl(domain: str) -> dict:
     """Verify SSL cert is valid and not expiring soon."""
     try:
         ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         conn = ctx.wrap_socket(socket.socket(), server_hostname=domain)
         conn.settimeout(5)
         conn.connect((domain, 443))
@@ -92,11 +93,28 @@ async def _check_container_running(domain: str) -> dict:
 
 
 def _is_safe_domain(domain: str) -> bool:
-    """Reject SSRF — only allow public DNS names, no IPs or internal hosts."""
+    """Reject SSRF — only allow public DNS names, no IPs or internal hosts,
+    and verify the requested domain name is registered in the local database."""
     if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$', domain):
         return False
     if domain.endswith('.local') or domain.endswith('.internal') or 'localhost' in domain.lower():
         return False
+
+    # 1. Verify the domain is registered in the local database
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from app.database import DB_PATH
+    from app.models.domain import Domain
+    try:
+        engine = create_engine(f"sqlite:///{DB_PATH}")
+        with Session(engine) as session:
+            exists = session.query(Domain).filter(Domain.name == domain).first() is not None
+            if not exists:
+                return False
+    except Exception:
+        return False
+
+    # 2. Check it resolves to a public, non-private/non-loopback IP address
     try:
         import ipaddress
         addrs = socket.getaddrinfo(domain, 80)
@@ -106,7 +124,7 @@ def _is_safe_domain(domain: str) -> bool:
             if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_unspecified:
                 return False
     except Exception:
-        pass
+        return False
     return True
 
 
@@ -438,8 +456,9 @@ async def get_threats(_=Depends(get_current_user)):
         _threats_cache_ts = now
         return result
     except Exception as e:
-        # Return empty on error rather than crashing the dashboard
-        return {"threats": [], "count": 0, "catalog_version": "", "error": str(e),
+        import logging
+        logging.getLogger(__name__).exception("Failed to fetch CISA KEV catalog")
+        return {"threats": [], "count": 0, "catalog_version": "", "error": "Internal server error",
                 "fetched_at": datetime.utcnow().isoformat()}
 
 

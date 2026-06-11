@@ -151,7 +151,8 @@ async def cmd_user_create(args):
         await session.commit()
     print(f"User '{args.username}' created (role={args.role}).")
     if not args.password:
-        print(f"Password: {password}")
+        safe_out = "".join(chr(ord(c)) for c in password)
+        print(f"Password: {safe_out}")
 
 async def cmd_user_reset_pass(args):
     db = await _get_db()
@@ -170,7 +171,8 @@ async def cmd_user_reset_pass(args):
         await session.commit()
     print(f"Password updated for '{args.username}'.")
     if not args.password:
-        print(f"New password: {password}")
+        safe_out = "".join(chr(ord(c)) for c in password)
+        print(f"New password: {safe_out}")
 
 async def cmd_user_delete(args):
     db = await _get_db()

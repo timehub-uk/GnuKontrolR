@@ -98,6 +98,9 @@ PORT_RANGES = {
 
 
 def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
+    for arg in cmd:
+        if not re.match(r"^[a-zA-Z0-9_./\-:={}\[\]\" %*]+$", arg):
+            raise ValueError(f"Dangerous argument in command: {arg}")
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 
@@ -110,8 +113,8 @@ def _port_is_free(port: int) -> bool:
     real conflict signal even against sockets that are in TIME_WAIT.
     """
     for family, addr in (
-        (socket.AF_INET,  "0.0.0.0"),
-        (socket.AF_INET6, "::"),
+        (socket.AF_INET,  "127.0.0.1"),
+        (socket.AF_INET6, "::1"),
     ):
         try:
             with socket.socket(family, socket.SOCK_STREAM) as s:
@@ -280,7 +283,7 @@ async def check_php_updates(dry_run: bool = False, _=Depends(require_admin)):
 async def build_php_version(version: str, _=Depends(require_admin)):
     """Force-build a specific PHP version image (e.g. '8.4')."""
     import re
-    if not re.fullmatch(r"\d+\.\d+", version):
+    if not re.fullmatch(r"\d{1,3}\.\d{1,3}", version):
         raise HTTPException(400, "Version must be in X.Y format (e.g. 8.4)")
     script = os.path.realpath(_PHP_UPDATE_SCRIPT)
     if not os.path.isfile(script):

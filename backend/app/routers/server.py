@@ -522,11 +522,19 @@ async def update_panel_config(body: dict):
     ns_summary  = await _dh.sync_all_ns(domains, ip)
     dns_summary = await _dh.sync_all_domains(domains, server_ip=ip)
 
+    errors = ns_summary.get("errors", []) + dns_summary.get("errors", [])
+    if errors:
+        import logging
+        _log = logging.getLogger(__name__)
+        for err in errors:
+            _log.error("Panel config update sync error: %s", err)
+        errors = ["One or more errors occurred during sync. Check server logs."]
+
     return {
         "ok":             True,
         "panel_domain":   panel_domain,
         "server_ip":      ip,
         "ns_updated":     len(ns_summary.get("updated", [])),
         "dns_provisioned": len(dns_summary.get("provisioned", [])),
-        "errors":         ns_summary.get("errors", []) + dns_summary.get("errors", []),
+        "errors":         errors,
     }

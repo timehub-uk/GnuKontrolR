@@ -183,7 +183,11 @@ def _write_traefik_resolver(domain_name: str, owner_email: str) -> None:
 
     File: {TRAEFIK_DYNAMIC_DIR}/acme_<domain_safe>.yml
     """
+    import re
     if not owner_email or "@" not in owner_email:
+        return
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain_name):
+        log.warning("Invalid domain name in _write_traefik_resolver: %s", domain_name)
         return
     safe = domain_name.replace(".", "_").replace("-", "_")
     resolver_name = f"le_{safe}"
@@ -201,9 +205,14 @@ def _write_traefik_resolver(domain_name: str, owner_email: str) -> None:
         f'          - main: "{domain_name}"\n'
         "            sans:\n"
         f'              - "www.{domain_name}"\n'
+        "    \n"
     )
     try:
-        path = os.path.join(_TRAEFIK_DYNAMIC_DIR, f"acme_{safe}.yml")
+        base_dir = os.path.abspath(_TRAEFIK_DYNAMIC_DIR)
+        path = os.path.abspath(os.path.join(base_dir, f"acme_{safe}.yml"))
+        if os.path.commonpath([base_dir, path]) != base_dir:
+            log.warning("Path traversal attempt in _write_traefik_resolver: %s", path)
+            return
         with open(path, "w") as f:
             f.write(config)
         log.info("Traefik resolver config written for %s (%s)", domain_name, owner_email)

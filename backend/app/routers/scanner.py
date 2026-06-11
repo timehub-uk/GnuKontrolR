@@ -150,8 +150,10 @@ async def start_scan(
             await db.commit()
             raise HTTPException(503, f"Container not reachable (domain={body.domain})")
         except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Scanner client error on area %s", area)
             errors += 1
-            findings.append({"area": area, "error": str(exc)})
+            findings.append({"area": area, "error": f"Internal scanner error on area {area}"})
             continue
 
         for item in result.get("results", []):

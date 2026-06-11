@@ -160,6 +160,11 @@ def _container_name(domain: str) -> str:
 
 
 def _run_in_container(domain: str, cmd: list[str], timeout: int = 120) -> tuple[int, str, str]:
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        raise ValueError("Invalid domain name")
+    for arg in cmd:
+        if not re.match(r"^[a-zA-Z0-9_./\-:={}\[\]\" %*]+$", arg):
+            raise ValueError(f"Dangerous argument in command: {arg}")
     container = _container_name(domain)
     r = subprocess.run(
         ["docker", "exec", container] + cmd,

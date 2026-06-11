@@ -165,8 +165,16 @@ def _add_security_headers(response):
 # ── Path safety ───────────────────────────────────────────────────────────────
 
 def _safe(base: Path, rel: str) -> Path:
-    target = (base / rel.lstrip("/")).resolve()
-    if not str(target).startswith(str(base.resolve())):
+    rel_clean = rel.lstrip("/")
+    if os.path.isabs(rel_clean) or ".." in rel_clean:
+        abort(400)
+    base_resolved = base.resolve()
+    target = (base_resolved / rel_clean).resolve()
+    try:
+        common = os.path.commonpath([str(base_resolved), str(target)])
+        if common != str(base_resolved):
+            abort(400)
+    except ValueError:
         abort(400)
     return target
 
@@ -2449,6 +2457,8 @@ def site_backup_create():
 
         if include_db:
             db_name, db_user, db_pass = _db_credentials()
+            if not re.match(r"^[a-zA-Z0-9_.-]+$", db_name) or not re.match(r"^[a-zA-Z0-9_.-]+$", db_user):
+                abort(400)
             dump_file = tmp_path / "database.sql"
             env = os.environ.copy()
             env["MYSQL_PWD"] = db_pass
@@ -2464,11 +2474,26 @@ def site_backup_create():
 
         # Build tar.gz
         dest_resolved = dest.resolve()
-        if not str(dest_resolved).startswith(str(BACKUPS_DIR.resolve())):
+        try:
+            base_backup_dir = BACKUPS_DIR.resolve()
+            if os.path.commonpath([str(base_backup_dir), str(dest_resolved)]) != str(base_backup_dir):
+                abort(400)
+        except ValueError:
             abort(400)
         cmd = ["tar", "-czf", str(dest_resolved)]
         for label, path_str in parts:
             p = Path(path_str).resolve()
+            p_str = str(p)
+            allowed = False
+            for parent_dir in (PUBLIC_ROOT, SECURE_ROOT, tmp_path):
+                try:
+                    if os.path.commonpath([str(parent_dir.resolve()), p_str]) == str(parent_dir.resolve()):
+                        allowed = True
+                        break
+                except ValueError:
+                    continue
+            if not allowed:
+                abort(400)
             cmd += ["-C", str(p.parent), p.name]
         subprocess.run(cmd, check=True, timeout=300)
 
@@ -2583,14 +2608,21 @@ def scanner_quarantine():
     try:
         src = _safe(_AREA_PATHS_MAP[area], rel_path)
     except PermissionError as e:
-        return jsonify({"error": str(e)}), 403
+        log.exception("Permission error quarantined file access")
+        return jsonify({"error": "Permission denied"}), 403
 
     if not src.exists():
         return jsonify({"error": "File not found"}), 404
 
     QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
     safe_rel = _safe_name(rel_path.replace('/', '__'))
-    dest = QUARANTINE_DIR / f"{area}__{safe_rel}_{int(time.time())}"
+    dest = (QUARANTINE_DIR / f"{area}__{safe_rel}_{int(time.time())}").resolve()
+    try:
+        common_dest = os.path.commonpath([str(QUARANTINE_DIR.resolve()), str(dest)])
+        if common_dest != str(QUARANTINE_DIR.resolve()):
+            return jsonify({"error": "Path traversal detected"}), 400
+    except ValueError:
+        return jsonify({"error": "Path traversal detected"}), 400
     shutil.move(str(src), str(dest))
     log.warning("QUARANTINE: moved %s → %s", src, dest)
     return jsonify({"ok": True, "quarantined_to": str(dest)})

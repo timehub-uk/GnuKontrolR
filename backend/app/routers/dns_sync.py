@@ -38,6 +38,10 @@ async def run_dns_sync() -> dict:
     summary = await sync_all_domains(domains)
     summary["synced_at"] = datetime.now(timezone.utc).isoformat()
     summary["domain_count"] = len(domains)
+    if "errors" in summary and summary["errors"]:
+        for err in summary["errors"]:
+            log.error("DNS sync error: %s", err)
+        summary["errors"] = ["One or more errors occurred during DNS sync. Check server logs."]
     _last_sync.clear()
     _last_sync.update(summary)
     return summary
@@ -283,6 +287,10 @@ async def trigger_ip_sync():
         "errors": ns_summary.get("errors", []) + dns_summary.get("errors", []),
         "synced_at": datetime.now(timezone.utc).isoformat(),
     }
+    if result_data["errors"]:
+        for err in result_data["errors"]:
+            log.error("IP sync error: %s", err)
+        result_data["errors"] = ["One or more errors occurred during IP sync. Check server logs."]
     _last_ip_check.clear()
     _last_ip_check.update({**result_data, "changed": True})
     return result_data
@@ -318,9 +326,9 @@ async def test_dns_connectivity():
         get_external_ip(), get_external_ipv6(), get_internal_ip(),
         return_exceptions=True,
     )
-    ipv4     = ipv4     if isinstance(ipv4, str)     else f"ERROR: {ipv4}"
+    ipv4     = ipv4     if isinstance(ipv4, str)     else "ERROR: IPv4 detection failed"
     ipv6     = ipv6     if isinstance(ipv6, str)     else None
-    internal = internal if isinstance(internal, str) else f"ERROR: {internal}"
+    internal = internal if isinstance(internal, str) else "ERROR: Internal IP detection failed"
 
     # ── PowerDNS API ─────────────────────────────────────────────────────────
     pdns_ok     = False
@@ -333,7 +341,8 @@ async def test_dns_connectivity():
             pdns_zones = [z["id"].rstrip(".") for z in r.json()]
             pdns_ok = True
     except Exception as exc:
-        pdns_error = str(exc)
+        log.exception("PowerDNS diagnostic error")
+        pdns_error = "PowerDNS connection failed"
 
     # ── Domain DB ────────────────────────────────────────────────────────────
     db_domains: list[str] = []
@@ -342,7 +351,8 @@ async def test_dns_connectivity():
             result = await db.execute(select(Domain))
             db_domains = [d.name for d in result.scalars().all()]
     except Exception as exc:
-        db_domains = [f"DB ERROR: {exc}"]
+        log.exception("Database diagnostic error")
+        db_domains = ["DB ERROR: Database query failed"]
 
     pdns_set = set(pdns_zones)
     db_set   = set(db_domains)

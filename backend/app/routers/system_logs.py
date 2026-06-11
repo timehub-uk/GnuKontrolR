@@ -39,7 +39,9 @@ def _docker_logs(container: str, tail: int = 200, search: str = "") -> list[str]
     except FileNotFoundError:
         return ["[error] docker not found in PATH"]
     except Exception as e:
-        return [f"[error] {e}"]
+        import logging
+        logging.getLogger(__name__).exception("Error fetching docker logs for %s", container)
+        return ["[error] Internal server error retrieving logs"]
 
 
 @router.get("/sources")
