@@ -20,6 +20,25 @@ class Base(DeclarativeBase):
     pass
 
 
+from sqlalchemy.types import TypeDecorator, String
+from app.encrypt import encrypt_field, decrypt_field
+
+class EncryptedString(TypeDecorator):
+    """Automatically encrypt string fields at rest using Fernet."""
+    impl = String
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None:
+            return encrypt_field(value)
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is not None:
+            return decrypt_field(value)
+        return value
+
+
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
