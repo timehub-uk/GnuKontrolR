@@ -3,7 +3,7 @@ import ipaddress
 import os
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel, EmailStr
@@ -83,7 +83,6 @@ class MFALoginRequest(BaseModel):
 @router.post("/token")
 async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
     """Step 1: Username/password login. Returns tokens or MFA challenge."""
-    from fastapi.security import OAuth2PasswordRequestForm
     client_ip = _get_client_ip(request)
     is_private = _is_private_ip(client_ip) or client_ip == "unknown"
 

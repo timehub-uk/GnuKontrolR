@@ -14,7 +14,7 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 
 BASE_URL = "http://localhost:8000"
 USERNAME = "admin"
-PASSWORD = "admin123"
+PASSWORD = "test123"
 
 # Pages to visit (route, display name, expected selector hints)
 PAGES = [
@@ -66,8 +66,14 @@ async def login(page: Page):
     await inputs[0].fill(USERNAME)
     await inputs[1].fill(PASSWORD)
     await page.click('button[type="submit"]')
+    
     # Wait for redirect away from /login
-    await page.wait_for_function("window.location.pathname !== '/login'", timeout=10000)
+    start_time = asyncio.get_event_loop().time()
+    while "/login" in page.url:
+        if asyncio.get_event_loop().time() - start_time > 10:
+            body_text = await page.evaluate("document.body.innerText")
+            raise Exception(f"Login timed out. Current URL: {page.url}. Page text: {body_text.strip()}")
+        await asyncio.sleep(0.5)
     print(f"[OK] Logged in — now at {page.url}")
 
 
@@ -176,6 +182,9 @@ async def main():
             ignore_https_errors=True,
         )
         page = await context.new_page()
+        page.on("console", lambda msg: print(f"[CONSOLE] {msg.type}: {msg.text}"))
+        page.on("pageerror", lambda err: print(f"[JS ERROR] {err}"))
+        page.on("requestfailed", lambda req: print(f"[NET FAIL] {req.method} {req.url} - {req.failure}"))
 
         # Capture all API errors globally
         all_api_errors = []
@@ -228,7 +237,7 @@ async def main():
     print(f"Screenshots at: {screenshots_dir}")
 
     # Append to bad.md
-    bad_md = Path("/home/gitmaster/GnuKontrolR/bad.md")
+    bad_md = Path("/home/gitmaster/projects/GnuKontrolR/bad.md")
     existing = bad_md.read_text() if bad_md.exists() else ""
 
     new_section = f"\n\n## Playwright UI Test Results — {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"

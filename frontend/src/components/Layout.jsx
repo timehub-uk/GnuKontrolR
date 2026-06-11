@@ -13,6 +13,7 @@ import { toast } from 'sonner';
 import AiPanel from './AiPanel';
 import CommandPalette from './CommandPalette';
 import SetupWizard from './SetupWizard';
+import CookieConsentBanner from './CookieConsentBanner';
 import api from '../utils/api';
 
 // ── Brand logo SVG ────────────────────────────────────────────────────────────
