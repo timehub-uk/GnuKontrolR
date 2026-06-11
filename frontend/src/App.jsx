@@ -6,33 +6,40 @@ import { Toaster } from 'sonner';
 import { queryClient } from './utils/queryClient';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Layout from './components/Layout';
-import LoginPage         from './pages/LoginPage';
-import Dashboard         from './pages/Dashboard';
-import DomainsPage       from './pages/DomainsPage';
-import UsersPage         from './pages/UsersPage';
-import DockerPage        from './pages/DockerPage';
-import ServicesPage      from './pages/ServicesPage';
-import MarketplacePage   from './pages/MarketplacePage';
-import DnsPage           from './pages/DnsPage';
-import FilesPage         from './pages/FilesPage';
-import DatabasesPage     from './pages/DatabasesPage';
-import EmailPage         from './pages/EmailPage';
-import SslPage           from './pages/SslPage';
-import LogsPage          from './pages/LogsPage';
-import BackupsPage       from './pages/BackupsPage';
-import TerminalPage      from './pages/TerminalPage';
-import SettingsPage      from './pages/SettingsPage';
-import AdminContentPage  from './pages/AdminContentPage';
-import ActivityLogPage   from './pages/ActivityLogPage';
-import SecurityPage      from './pages/SecurityPage';
-import MenuPage          from './pages/MenuPage';
-import AiAdminPage       from './pages/AiAdminPage';
-import DiagnosticPage    from './pages/DiagnosticPage';
-import NotificationsPage from './pages/NotificationsPage';
-import NetworkingPage      from './pages/NetworkingPage';
+import CookieConsentBanner from './components/CookieConsentBanner';
+import LoginPage            from './pages/LoginPage';
+import Dashboard            from './pages/Dashboard';
+import DomainsPage          from './pages/DomainsPage';
+import UsersPage            from './pages/UsersPage';
+import DockerPage           from './pages/DockerPage';
+import ServicesPage         from './pages/ServicesPage';
+import MarketplacePage      from './pages/MarketplacePage';
+import DnsPage              from './pages/DnsPage';
+import FilesPage            from './pages/FilesPage';
+import DatabasesPage        from './pages/DatabasesPage';
+import EmailPage            from './pages/EmailPage';
+import SslPage              from './pages/SslPage';
+import LogsPage             from './pages/LogsPage';
+import BackupsPage          from './pages/BackupsPage';
+import TerminalPage         from './pages/TerminalPage';
+import SettingsPage         from './pages/SettingsPage';
+import AdminContentPage   from './pages/AdminContentPage';
+import ActivityLogPage    from './pages/ActivityLogPage';
+import SecurityPage       from './pages/SecurityPage';
+import MenuPage           from './pages/MenuPage';
+import AiAdminPage        from './pages/AiAdminPage';
+import DiagnosticPage     from './pages/DiagnosticPage';
+import NotificationsPage  from './pages/NotificationsPage';
+import NetworkingPage     from './pages/NetworkingPage';
 import AiContainersPage   from './pages/AiContainersPage';
 import CronsPage          from './pages/CronsPage';
 import PlansPage          from './pages/PlansPage';
+import MfaSetupPage       from './pages/MfaSetupPage';
+import PrivacyPolicyPage  from './pages/Privacy/PrivacyPolicyPage';
+import TermsOfServicePage from './pages/Privacy/TermsOfServicePage';
+import CookieConsentPage  from './pages/Privacy/CookieConsentPage';
+import DataExportPage     from './pages/Privacy/DataExportPage';
+import DataSubjectRequestPage from './pages/Privacy/DataSubjectRequestPage';
 
 const pageTransition = {
   initial:    { opacity: 0, y: 8 },
@@ -80,6 +87,12 @@ function AnimatedRoutes() {
         <Route path="/ai-containers"   element={<Pg><AiContainersPage /></Pg>} />
         <Route path="/crons"          element={<Pg><CronsPage /></Pg>} />
         <Route path="/plans"          element={<Pg><PlansPage /></Pg>} />
+        <Route path="/mfa"            element={<Pg><MfaSetupPage /></Pg>} />
+        <Route path="/privacy/privacy-policy"  element={<Pg><PrivacyPolicyPage /></Pg>} />
+        <Route path="/privacy/terms-of-service" element={<Pg><TermsOfServicePage /></Pg>} />
+        <Route path="/privacy/cookies" element={<Pg><CookieConsentPage /></Pg>} />
+        <Route path="/privacy/data-export" element={<Pg><DataExportPage /></Pg>} />
+        <Route path="/privacy/dsar"   element={<Pg><DataSubjectRequestPage /></Pg>} />
       </Routes>
     </AnimatePresence>
   );

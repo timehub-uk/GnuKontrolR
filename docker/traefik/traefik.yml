@@ -25,7 +25,7 @@ entryPoints:
 certificatesResolvers:
   le:
     acme:
-      email: "ssl@example.com"  # overridden by TRAEFIK_CERTIFICATESRESOLVERS_LE_ACME_EMAIL env var
+      email: "panel@resemble.media"  # set by secrets-init.sh
       storage: /certs/acme.json
       httpChallenge:
         entryPoint: web

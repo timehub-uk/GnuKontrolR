@@ -1,5 +1,6 @@
 """JWT authentication and password hashing."""
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -47,6 +48,22 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
 
+def validate_password_strength(password: str) -> Optional[str]:
+    """Validate password against security policy rules.
+    Returns an error message if invalid, None if valid."""
+    if len(password) < 12:
+        return "Password must be at least 12 characters long"
+    if not re.search(r'[A-Z]', password):
+        return "Password must contain at least one uppercase letter"
+    if not re.search(r'[a-z]', password):
+        return "Password must contain at least one lowercase letter"
+    if not re.search(r'[0-9]', password):
+        return "Password must contain at least one digit"
+    if not re.search(r'[!@#$%^&*()_+\-=\[\]{};:\'",.<>/?\\|`~]', password):
+        return "Password must contain at least one special character"
+    return None
+
+
 # ── Token helpers ─────────────────────────────────────────────────
 
 def create_token(data: dict, expires_delta: timedelta) -> str:
@@ -54,9 +71,9 @@ def create_token(data: dict, expires_delta: timedelta) -> str:
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def create_access_token(user_id: int, role: str) -> str:
+def create_access_token(user_id: int, role: str, mfa_verified: bool = False) -> str:
     return create_token(
-        {"sub": str(user_id), "role": role, "type": "access"},
+        {"sub": str(user_id), "role": role, "type": "access", "mfa": mfa_verified},
         timedelta(minutes=ACCESS_EXPIRE),
     )
 
@@ -65,6 +82,14 @@ def create_refresh_token(user_id: int) -> str:
     return create_token(
         {"sub": str(user_id), "type": "refresh"},
         timedelta(days=REFRESH_EXPIRE),
+    )
+
+
+def create_mfa_token(user_id: int) -> str:
+    """Short-lived token for MFA verification step."""
+    return create_token(
+        {"sub": str(user_id), "type": "mfa_challenge"},
+        timedelta(minutes=5),
     )
 
 

@@ -110,7 +110,7 @@ services:
       - powerdns_data:/var/lib/powerdns
       - ./docker/powerdns/pdns.conf:/etc/powerdns/pdns.conf:ro
     environment:
-      - PDNS_AUTH_API_KEY=${PDNS_API_KEY:-changeme_pdns_key}
+      - PDNS_AUTH_API_KEY=${PDNS_API_KEY}
 
   # ── MySQL Master ───────────────────────────────────────────────────────────
   mysql:
@@ -260,6 +260,11 @@ services:
       - /var/webpanel/app-cache:/var/webpanel/app-cache  # marketplace app cache
       - /var/webpanel/localdns:/var/webpanel/localdns    # localdns hosts file (written by panel, read by dnsmasq)
       - ./docker/traefik/dynamic:/app/traefik_dynamic   # panel writes per-domain IP block configs; Traefik reads them
+      # ── Secrets vault (read-only) ─────────────────────────────────────
+      # Mounts the entire secrets vault at /run/secrets/ so panel code can
+      # read environment variables, TLS certs, SSH keys, and config files
+      # without storing them in image layers or env vars.
+      - /opt/gnukontrolr/secrets/356a78ee-e4ad-41ff-b644-0ad7e8bf6420:/run/secrets:ro
     environment:
       - SECRET_KEY=${SECRET_KEY:-change_me_in_production}
       - SERVER_IP=${SERVER_IP}
@@ -285,16 +290,14 @@ services:
         condition: service_started
     labels:
       - traefik.enable=true
-      # Catch-all router for frontend SPA + any non-API paths
+      # Single router + single service — both the SPA and API run on port 8000
+      # of the same FastAPI process. Traefik would log warnings if multiple
+      # services both point to the same port on the same container.
       - traefik.http.routers.webpanel.rule=Host(`${PANEL_DOMAIN}`)
       - traefik.http.routers.webpanel.tls=true
       - traefik.http.routers.webpanel.tls.certresolver=le
+      - traefik.http.routers.webpanel.service=webpanel
       - traefik.http.services.webpanel.loadbalancer.server.port=8000
-      # API-specific router (higher priority due to longer rule)
-      - traefik.http.routers.webpanel-api.rule=Host(`${PANEL_DOMAIN}`) && PathPrefix(`/api`)
-      - traefik.http.routers.webpanel-api.tls=true
-      - traefik.http.routers.webpanel-api.tls.certresolver=le
-      - traefik.http.services.webpanel-api.loadbalancer.server.port=8000
 
   # ── Prometheus ─────────────────────────────────────────────────────────────
   prometheus:

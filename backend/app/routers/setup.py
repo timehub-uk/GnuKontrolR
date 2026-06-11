@@ -1,8 +1,11 @@
 """First-time setup wizard — status, completion, and cron creation."""
 import asyncio
+import base64
 import logging
 import os
 import secrets
+import shlex
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -13,7 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.setup import SetupState
 from app.models.user import User
+from app.models.fail2ban import Fail2banJail
 from app.auth import get_current_user, require_superadmin, hash_password
+from app.secrets import vault_summary, get_manifest, vault_is_mounted
 
 log = logging.getLogger("webpanel")
 
@@ -74,6 +79,39 @@ async def _get_or_create_state(db: AsyncSession) -> SetupState:
     return state
 
 
+# ── Secrets Vault endpoints (security matrix) ─────────────────────────────
+
+@router.get("/secrets/vault")
+async def secrets_vault_status(
+    current: User = Depends(get_current_user),
+):
+    """Return the secrets vault mount status and summary.
+
+    The setup wizard uses this to verify the vault is correctly mounted
+    and to display the installation UUID, secret count, and service mapping.
+    """
+    return vault_summary()
+
+
+@router.get("/secrets/manifest")
+async def secrets_manifest(
+    current: User = Depends(get_current_user),
+):
+    """Return the full security matrix manifest (secrets.json).
+
+    Maps every secret file to its purpose, owning service, permissions,
+    and SHA-256 hash — for audit / verification in the setup wizard.
+    """
+    if not vault_is_mounted():
+        raise HTTPException(status_code=503, detail="Secrets vault not mounted")
+    m = get_manifest()
+    if m is None:
+        raise HTTPException(status_code=404, detail="No manifest found")
+    return m
+
+
+# ── Setup wizard status ────────────────────────────────────────────────────
+
 @router.get("/status")
 async def get_setup_status(
     db: AsyncSession = Depends(get_db),
@@ -92,6 +130,11 @@ async def get_setup_status(
             "cve_cron_set": state.cve_cron_set,
             "update_cron_set": state.update_cron_set,
             "services_pruned": state.services_pruned,
+            "mfa_configured": state.mfa_configured,
+            "dsar_contact_set": state.dsar_contact_set,
+            "data_retention_set": state.data_retention_set,
+            "consent_seeded": state.consent_seeded,
+            "privacy_policy_done": state.privacy_policy_done,
         },
     }
 
@@ -122,6 +165,32 @@ async def complete_setup(
     state.step_index = 99
     await db.commit()
     return {"ok": True}
+
+
+@router.post("/reset")
+async def reset_setup(
+    db: AsyncSession = Depends(get_db),
+    current: User = Depends(get_current_user),
+):
+    """Reset the setup wizard so it appears again on next page load."""
+    state = await _get_or_create_state(db)
+    state.completed = False
+    state.step_index = 0
+    state.secrets_changed = False
+    state.fail2ban_done = False
+    state.geo_block_done = False
+    state.grafana_done = False
+    state.backup_cron_set = False
+    state.cve_cron_set = False
+    state.update_cron_set = False
+    state.services_pruned = False
+    state.mfa_configured = False
+    state.dsar_contact_set = False
+    state.data_retention_set = False
+    state.consent_seeded = False
+    state.privacy_policy_done = False
+    await db.commit()
+    return {"ok": True, "message": "Setup wizard has been reset."}
 
 
 @router.post("/crons")
@@ -210,6 +279,7 @@ async def reset_setup(
 
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")
+_ENV_PATH = os.path.normpath(_ENV_PATH)
 
 
 def _read_env() -> dict[str, str]:
@@ -223,34 +293,37 @@ def _read_env() -> dict[str, str]:
                     env[k.strip()] = v.strip()
     except FileNotFoundError:
         pass
+    except PermissionError:
+        log.warning("Cannot read .env at %s (permission)", _ENV_PATH)
     return env
 
 
 def _write_env(env: dict[str, str]) -> None:
-    lines: list[str] = []
-    seen: set[str] = set()
     try:
-        with open(_ENV_PATH) as f:
-            for line_raw in f:
-                stripped = line_raw.strip()
-                if stripped and "=" in stripped and not stripped.startswith("#"):
-                    k = stripped.split("=", 1)[0].strip()
-                    if k in env:
-                        lines.append(f"{k}={env[k]}\n")
-                        seen.add(k)
+        lines: list[str] = []
+        seen: set[str] = set()
+        try:
+            with open(_ENV_PATH) as f:
+                for line_raw in f:
+                    stripped = line_raw.strip()
+                    if stripped and "=" in stripped and not stripped.startswith("#"):
+                        k = stripped.split("=", 1)[0].strip()
+                        if k in env:
+                            lines.append(f"{k}={env[k]}\n")
+                            seen.add(k)
+                        else:
+                            lines.append(line_raw)
                     else:
                         lines.append(line_raw)
-                else:
-                    lines.append(line_raw)
+        except (FileNotFoundError, PermissionError):
+            pass
         for k, v in env.items():
             if k not in seen:
                 lines.append(f"{k}={v}\n")
         with open(_ENV_PATH, "w") as f:
             f.writelines(lines)
-    except FileNotFoundError:
-        with open(_ENV_PATH, "w") as f:
-            for k, v in env.items():
-                f.write(f"{k}={v}\n")
+    except PermissionError as exc:
+        log.warning("Cannot write .env at %s (%s) — key updated in memory only", _ENV_PATH, exc)
 
 
 @router.post("/rotate-secrets")
@@ -282,3 +355,207 @@ async def rotate_secrets(
         "password_updated": bool(new_password),
         "restart_required": True,
     }
+
+
+# ── fail2ban jail installer ────────────────────────────────────────────────────
+
+_FILTER_DIR = Path("/etc/fail2ban/filter.d")
+
+_FILTERS: dict[str, str] = {
+    "gnu-traefik": (
+        '[Definition]\n'
+        'failregex = ^<HOST> - - \\S+ "\\w+ /[^"]*" (401|403) \\d+ ".*" ".*"$\n'
+        'ignoreregex =\n'
+    ),
+    "gnu-panel-api": (
+        '[Definition]\n'
+        'failregex = ^.*?INFO:     <HOST>:\\d+ - "POST /api/auth/token HTTP/.*" 401\\b\n'
+        'ignoreregex =\n'
+    ),
+    "gnu-postfix": (
+        '[Definition]\n'
+        'failregex = ^.*?postfix/smtpd\\[\\d+\\]: warning: .*\\[<HOST>\\]: SASL (LOGIN|PLAIN) authentication failed\\b\n'
+        '            ^.*?postfix/smtpd\\[\\d+\\]: warning: .*\\[<HOST>\\]: lost connection after AUTH\\b\n'
+        '            ^.*?postfix/smtpd\\[\\d+\\]: warning: .*\\[<HOST>\\]: SASL authentication failed\\b\n'
+        'ignoreregex =\n'
+    ),
+    "gnu-dovecot": (
+        '[Definition]\n'
+        'failregex = ^.*?dovecot.*?auth(?:-worker)?:\\s+(?:Error|Info|Warning):\\s+.*?(?:Authentication failed|aborted login|disconnected).*?\\[<HOST>\\]\\b\n'
+        '            ^.*?dovecot.*?auth(?:-worker)?:\\s+(?:Error|Info|Warning):\\s+.*?\\[<HOST>\\].*?(?:Authentication failed|aborted login|disconnected)\\b\n'
+        'ignoreregex =\n'
+    ),
+}
+
+_JAILS_CONF: list[dict] = [
+    {"name": "sshd", "port": "ssh", "filter_name": "sshd", "logpath": "/var/log/auth.log",
+     "maxretry": 5, "findtime": 600, "bantime": 3600, "comment": "SSH brute-force protection"},
+    {"name": "gnu-traefik", "port": "http,https", "filter_name": "gnu-traefik",
+     "logpath": "/var/log/containers/webpanel_traefik.log",
+     "maxretry": 10, "findtime": 600, "bantime": 3600,
+     "comment": "Traefik unauthorized access (401/403)"},
+    {"name": "gnu-panel-api", "port": "http,https", "filter_name": "gnu-panel-api",
+     "logpath": "/var/log/containers/webpanel_api.log",
+     "maxretry": 5, "findtime": 300, "bantime": 7200,
+     "comment": "Panel API failed login attempts"},
+    {"name": "gnu-postfix", "port": "smtp,submission", "filter_name": "gnu-postfix",
+     "logpath": "/var/log/containers/webpanel_postfix.log",
+     "maxretry": 3, "findtime": 300, "bantime": 86400,
+     "comment": "Postfix SASL auth failures"},
+    {"name": "gnu-dovecot", "port": "imap,imaps,pop3,pop3s", "filter_name": "gnu-dovecot",
+     "logpath": "/var/log/containers/webpanel_dovecot.log",
+     "maxretry": 3, "findtime": 300, "bantime": 86400,
+     "comment": "Dovecot IMAP/POP3 auth failures"},
+]
+
+_TAILER_SCRIPT_START = """#!/usr/bin/env bash
+set -euo pipefail
+LOGDIR=/var/log/containers
+mkdir -p "$LOGDIR"
+for name in webpanel_traefik webpanel_postfix webpanel_dovecot webpanel_api; do
+  pidfile="/var/run/docker-log-${name}.pid"
+  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+    continue
+  fi
+  nohup docker logs -f --tail=0 "$name" > "${LOGDIR}/${name}.log" 2>&1 &
+  echo $! > "$pidfile"
+done
+"""
+
+_TAILER_SCRIPT_STOP = """#!/usr/bin/env bash
+set -euo pipefail
+for name in webpanel_traefik webpanel_postfix webpanel_dovecot webpanel_api; do
+  pidfile="/var/run/docker-log-${name}.pid"
+  if [ -f "$pidfile" ]; then
+    pid=$(cat "$pidfile")
+    kill "$pid" 2>/dev/null || true
+    rm -f "$pidfile"
+  fi
+done
+"""
+
+_TAILER_SYSTEMD_UNIT = """[Unit]
+Description=Docker container log tailers for fail2ban
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/start-docker-log-tailers
+RemainAfterExit=true
+ExecStop=/usr/local/bin/stop-docker-log-tailers
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+_JAIL_DEFAULTS_CONF = (
+    '# GnuKontrolR fail2ban defaults — do not edit manually\n'
+    '[DEFAULT]\n'
+    'bantime = 3600\n'
+    'findtime = 600\n'
+    'maxretry = 5\n'
+    'banaction = nftables-multiport\n'
+    'banaction_allports = nftables-allports\n'
+    'ignoreip = 127.0.0.1/8 ::1 172.30.0.0/16\n'
+    'backend = auto\n'
+)
+
+
+def _host_write(path: str, content: str) -> None:
+    """Write a file on the host via a privileged Docker container (base64-safe).
+
+    The container mounts the host root at /host, so we prefix all paths.
+    """
+    encoded = base64.b64encode(content.encode()).decode()
+    hp = f"/host{path}"
+    script = f"mkdir -p $(dirname '{hp}') && echo '{encoded}' | base64 -d > '{hp}' && chmod 644 '{hp}'"
+    try:
+        subprocess.run(
+            ["docker", "run", "--rm", "--privileged",
+             "-v", "/:/host", "alpine:latest",
+             "sh", "-c", script],
+            capture_output=True, timeout=60,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+
+def _host_run(cmd: list[str]) -> None:
+    """Run a command on the host via nsenter in a privileged Docker container."""
+    joined = " ".join(shlex.quote(c) for c in cmd)
+    try:
+        subprocess.run(
+            ["docker", "run", "--rm", "--privileged", "--pid=host",
+             "alpine:latest",
+             "nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--",
+             "sh", "-c", joined],
+            capture_output=True, timeout=60,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+
+@router.post("/setup-fail2ban")
+async def setup_fail2ban(
+    db: AsyncSession = Depends(get_db),
+    current: User = Depends(require_superadmin),
+):
+    """Install or re-apply fail2ban config. Idempotent — safe to call repeatedly."""
+    # 1. Write filter files on host
+    for name, content in _FILTERS.items():
+        _host_write(f"/etc/fail2ban/filter.d/{name}.conf", content)
+
+    # 2. Write defaults on host
+    _host_write("/etc/fail2ban/jail.d/00-webpanel-defaults.conf", _JAIL_DEFAULTS_CONF)
+
+    # 3. Write docker-log-tailers scripts and systemd service on host
+    _host_write("/usr/local/bin/start-docker-log-tailers", _TAILER_SCRIPT_START)
+    _host_write("/usr/local/bin/stop-docker-log-tailers", _TAILER_SCRIPT_STOP)
+    _host_write("/etc/systemd/system/docker-log-tailers.service", _TAILER_SYSTEMD_UNIT)
+
+    # 4. Make scripts executable + reload systemd + start tailers
+    _host_run(["chmod", "755", "/usr/local/bin/start-docker-log-tailers",
+               "/usr/local/bin/stop-docker-log-tailers"])
+    _host_run(["systemctl", "daemon-reload"])
+    _host_run(["systemctl", "enable", "docker-log-tailers"])
+    _host_run(["systemctl", "start", "docker-log-tailers"])
+
+    # 5. Write individual jail configs on host
+    for cfg in _JAILS_CONF:
+        conf = (
+            f"# Auto-generated by GnuKontrolR\n"
+            f"[{cfg['name']}]\n"
+            f"enabled  = true\n"
+            f"maxretry = {cfg['maxretry']}\n"
+            f"findtime = {cfg['findtime']}\n"
+            f"bantime  = {cfg['bantime']}\n"
+            f"port     = {cfg['port']}\n"
+            f"filter   = {cfg['filter_name']}\n"
+            f"logpath  = {cfg['logpath']}\n"
+        )
+        _host_write(f"/etc/fail2ban/jail.d/webpanel-{cfg['name']}.conf", conf)
+
+    _host_run(["systemctl", "restart", "fail2ban"])
+
+    # 6. Create jail records in DB if they don't already exist
+    existing = {j.name for j in (await db.execute(select(Fail2banJail))).scalars().all()}
+    created = []
+    for cfg in _JAILS_CONF:
+        if cfg["name"] not in existing:
+            jail = Fail2banJail(
+                name=cfg["name"], port=cfg["port"], filter_name=cfg["filter_name"],
+                logpath=cfg["logpath"], maxretry=cfg["maxretry"], findtime=cfg["findtime"],
+                bantime=cfg["bantime"], comment=cfg["comment"], enabled=True,
+            )
+            db.add(jail)
+            await db.commit()
+            await db.refresh(jail)
+            created.append(jail.name)
+
+    # 7. Mark setup step done
+    state = await _get_or_create_state(db)
+    state.fail2ban_done = True
+    await db.commit()
+
+    return {"ok": True, "jails": created or list(existing)}

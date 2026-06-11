@@ -38,6 +38,30 @@ class ProfileUpdate(BaseModel):
     country: Optional[str] = None
 
 
+@router.get("/me")
+async def my_profile(current: User = Depends(get_current_user)):
+    """Return the authenticated user's profile."""
+    return {
+        "id":             current.id,
+        "username":       current.username,
+        "email":          current.email,
+        "full_name":      current.full_name,
+        "preferred_name": current.preferred_name or "",
+        "role":           current.role,
+        "is_active":      current.is_active,
+        "is_suspended":   current.is_suspended,
+        "disk_quota_mb":  current.disk_quota_mb,
+        "bw_quota_mb":    current.bw_quota_mb,
+        "max_domains":    current.max_domains,
+        "max_databases":  current.max_databases,
+        "max_emails":     current.max_emails,
+        "company":        current.company,
+        "phone":          current.phone,
+        "country":        current.country,
+        "created_at":     current.created_at.isoformat() if current.created_at else None,
+    }
+
+
 @router.get("/")
 async def list_users(db: AsyncSession = Depends(get_db), _=Depends(require_admin)):
     result = await db.execute(select(User).order_by(User.id))

@@ -1,6 +1,6 @@
 """User model."""
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SAEnum, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SAEnum, ForeignKey, Text
 from sqlalchemy.orm import relationship
 import enum
 from app.database import Base
@@ -52,6 +52,23 @@ class User(Base):
 
     # Superadmin support PIN (bcrypt hash of 6-digit numeric PIN)
     support_pin_hash = Column(String(256), nullable=True, default=None)
+
+    # Consent & GDPR fields
+    consent_version   = Column(String(16), nullable=True, default=None)  # Last accepted consent version
+    data_exported_at  = Column(DateTime, nullable=True)                   # Last data export timestamp
+    erasure_requested = Column(Boolean, default=False)                    # Right to erasure flag
+    erasure_scheduled = Column(DateTime, nullable=True)                   # When erasure will be executed
+    marketing_opt_in  = Column(Boolean, default=False)                    # Marketing consent
+    cookie_preferences = Column(Text, nullable=True)                      # JSON-encoded cookie preferences
+
+    # Account security
+    last_login_at   = Column(DateTime, nullable=True)                    # Last successful login
+    last_login_ip   = Column(String(64), nullable=True)                  # Last login IP (hashed)
+    password_changed_at = Column(DateTime, nullable=True)                # Last password change
+    mfa_enabled     = Column(Boolean, default=False)                     # Whether MFA is active
+    failed_logins   = Column(Integer, default=0)                         # Consecutive failed logins
+    locked_until    = Column(DateTime, nullable=True)                    # Account lockout expiry
+    recovery_codes_hash = Column(String(512), nullable=True)             # Hashed recovery codes
 
     domains   = relationship("Domain", back_populates="owner", cascade="all, delete-orphan")
     plan      = relationship("HostingPlan", foreign_keys=[plan_id])

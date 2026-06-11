@@ -47,14 +47,13 @@ async def _set_cached(db: AsyncSession, key: str, data: dict) -> None:
     )).scalar_one_or_none()
     payload = json.dumps(data)
     if row:
-        row.archive_path = payload
         row.cached_at = datetime.utcnow()
     else:
         row = AppCacheEntry(
             app_id=key,
-            app_name=key,
-            version="cache",
-            archive_path=payload,
+            filename="cve-feed.json",
+            size_bytes=len(payload),
+            is_canonical=True,
             cached_at=datetime.utcnow(),
         )
         db.add(row)

@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Shield, ShieldCheck, Globe, BarChart3, HardDrive,
   RefreshCw, Server, Check, ChevronRight, ChevronLeft,
   Sparkles, ExternalLink, Clock, Activity, Settings,
-  Eye, Loader, XCircle, CheckCircle,
+  Eye, Loader, XCircle, CheckCircle, Smartphone, ClipboardList,
+  Trash2, FileText, Key, Copy, Download,
 } from 'lucide-react';
 import api from '../utils/api';
 import { toast } from 'sonner';
@@ -84,6 +85,38 @@ const STEPS = [
     title: 'Disable Unused Services',
     description: 'Review running services and disable anything you don\'t need.',
     field: 'services_pruned',
+    interactive: true,
+  },
+  {
+    id: 'dsar_contact',
+    icon: ClipboardList,
+    title: 'Set DSAR Contact',
+    description: 'Configure the Data Protection Officer contact for privacy requests.',
+    field: 'dsar_contact_set',
+    interactive: true,
+  },
+  {
+    id: 'data_retention',
+    icon: Trash2,
+    title: 'Data Retention Policy',
+    description: 'Review and confirm data retention schedules for compliance.',
+    field: 'data_retention_set',
+    interactive: false,
+  },
+  {
+    id: 'privacy_policy',
+    icon: FileText,
+    title: 'Accept Privacy Policy',
+    description: 'Review and accept the platform privacy policy.',
+    field: 'privacy_policy_done',
+    interactive: true,
+  },
+  {
+    id: 'mfa',
+    icon: Smartphone,
+    title: 'Configure MFA / 2FA',
+    description: 'Set up multi-factor authentication with QR code + recovery codes.',
+    field: 'mfa_configured',
     interactive: true,
   },
 ];
@@ -251,13 +284,17 @@ function SecretsStep({ onDone, stepState, markStep }) {
 function Fail2banStep({ onDone, markStep }) {
   const [jails, setJails] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [installing, setInstalling] = useState(false);
   const [toggling, setToggling] = useState(null);
+  const [installError, setInstallError] = useState(null);
+
+  const [refreshing, setRefreshing] = useState(false);
 
   const load = async () => {
     try {
       const { data } = await api.get('/api/fail2ban/jails');
       setJails(data.jails || []);
-      if ((data.jails || []).every(j => j.enabled)) {
+      if ((data.jails || []).length > 0 && (data.jails || []).every(j => j.enabled)) {
         await markStep('fail2ban_done', true);
       }
     } catch {
@@ -268,6 +305,39 @@ function Fail2banStep({ onDone, markStep }) {
   };
 
   useEffect(() => { load(); }, []);
+
+  const install = async () => {
+    setInstalling(true);
+    setInstallError(null);
+    try {
+      await api.post('/api/setup/setup-fail2ban');
+      toast.success('Fail2ban jails installed and configured');
+      await load();
+      onDone();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || err.message;
+      setInstallError(msg);
+      toast.error('Failed to install fail2ban: ' + msg);
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  const reapply = async () => {
+    setRefreshing(true);
+    setInstallError(null);
+    try {
+      await api.post('/api/setup/setup-fail2ban');
+      toast.success('Fail2ban config re-applied');
+      await load();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || err.message;
+      setInstallError(msg);
+      toast.error('Failed to re-apply fail2ban: ' + msg);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const toggle = async (jail, enable) => {
     setToggling(jail.id);
@@ -289,7 +359,25 @@ function Fail2banStep({ onDone, markStep }) {
   return (
     <div className="space-y-2">
       {jails.length === 0 && (
-        <p className="text-sm text-ink-muted">No fail2ban jails found. Install fail2ban first.</p>
+        <div className="space-y-3">
+          <p className="text-sm text-ink-muted">
+            Fail2ban is not yet configured. This will set up jails for SSH, web panel, and mail services.
+          </p>
+          {installError && (
+            <p className="text-xs text-bad-light">{installError}</p>
+          )}
+          <button
+            onClick={install}
+            disabled={installing}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-brand text-white text-sm font-medium hover:bg-brand-light transition-colors disabled:opacity-50"
+          >
+            {installing ? (
+              <><Loader size={14} className="animate-spin" /> Installing…</>
+            ) : (
+              <><ShieldCheck size={14} /> Install &amp; Configure</>
+            )}
+          </button>
+        </div>
       )}
       {jails.map(jail => (
         <div key={jail.id} className="flex items-center justify-between py-2 px-3 rounded-lg bg-panel-elevated">
@@ -310,21 +398,73 @@ function Fail2banStep({ onDone, markStep }) {
           </button>
         </div>
       ))}
-      {jails.length > 0 && jails.every(j => j.enabled) && (
-        <div className="flex items-center gap-2 text-ok text-sm pt-2">
-          <Check size={14} /> All jails enabled
+      {jails.length > 0 && (
+        <div className="flex items-center gap-2 pt-2">
+          <button
+            onClick={reapply}
+            disabled={refreshing}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-panel-elevated text-ink-secondary text-xs font-medium hover:bg-panel-border transition-colors disabled:opacity-50"
+          >
+            {refreshing ? (
+              <><Loader size={12} className="animate-spin" /> Re-applying…</>
+            ) : (
+              <><RefreshCw size={12} /> Re-apply Config</>
+            )}
+          </button>
+          {jails.every(j => j.enabled) && (
+            <span className="flex items-center gap-1.5 text-ok text-xs ml-auto">
+              <Check size={12} /> All jails enabled
+            </span>
+          )}
         </div>
+      )}
+      {installError && jails.length > 0 && (
+        <p className="text-xs text-bad-light">{installError}</p>
       )}
     </div>
   );
 }
 
+const COUNTRY_REGIONS = {
+  'Eastern Europe': ['AL','BA','BG','BY','CZ','EE','HR','HU','LT','LV','MD','ME','MK','PL','RO','RS','SK','SI','UA'],
+  'Western Europe': ['AT','BE','CH','DE','DK','ES','FI','FR','GB','GR','IE','IS','IT','LU','NL','NO','PT','SE'],
+  'Middle East & North Africa': ['AE','BH','DZ','EG','IL','IQ','IR','JO','KW','LB','LY','MA','OM','PS','QA','SA','SY','TN','YE'],
+  'Sub-Saharan Africa': ['AO','BF','BI','BJ','BW','CD','CF','CG','CI','CM','CV','DJ','ER','ET','GA','GH','GM','GN','GQ','KE','KM','LR','LS','MG','ML','MR','MU','MW','MZ','NA','NE','NG','RW','SC','SD','SL','SN','SO','SS','ST','SZ','TD','TG','TZ','UG','ZA','ZM','ZW'],
+  'Asia-Pacific': ['AF','AM','AU','AZ','BD','BN','BT','CN','FJ','GE','ID','IN','JP','KG','KH','KP','KR','KZ','LA','LK','MM','MN','MV','MY','NP','NZ','PG','PH','PK','SB','SG','TH','TJ','TL','TM','TV','UZ','VN','VU','WS'],
+  'Americas': ['AG','AR','BB','BO','BR','BS','BZ','CA','CL','CO','CR','CU','DM','DO','EC','GD','GT','GY','HN','HT','JM','MX','NI','PA','PE','PY','SR','SV','TT','US','UY','VC','VE'],
+};
+
+const REGION_DISPLAY = {
+  'Eastern Europe': { desc: 'Eastern & Central Europe', icon: '🏰' },
+  'Western Europe': { desc: 'Western & Southern Europe', icon: '🏛️' },
+  'Middle East & North Africa': { desc: 'MENA region', icon: '🏜️' },
+  'Sub-Saharan Africa': { desc: 'Central & Southern Africa', icon: '🌍' },
+  'Asia-Pacific': { desc: 'Asia, Oceania & Pacific', icon: '🌏' },
+  'Americas': { desc: 'North, Central & South America', icon: '🌎' },
+};
+
+const QUICK_BLOCK = [
+  { label: 'China', code: 'CN' },
+  { label: 'Russia', code: 'RU' },
+  { label: 'North Korea', code: 'KP' },
+  { label: 'Iran', code: 'IR' },
+  { label: 'Syria', code: 'SY' },
+  { label: 'Venezuela', code: 'VE' },
+  { label: 'Cuba', code: 'CU' },
+  { label: 'Belarus', code: 'BY' },
+  { label: 'Myanmar', code: 'MM' },
+  { label: 'Sudan', code: 'SD' },
+];
+
 function GeoStep({ onDone, markStep }) {
   const [countries, setCountries] = useState([]);
   const [blocked, setBlocked] = useState({});
   const [loading, setLoading] = useState(true);
-  const [toggling, setToggling] = useState(null);
-  const [filter, setFilter] = useState('');
+  const [input, setInput] = useState('');
+  const [suggestions, setSuggestions] = useState([]);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(-1);
+  const inputRef = useRef(null);
 
   const load = async () => {
     try {
@@ -346,57 +486,155 @@ function GeoStep({ onDone, markStep }) {
 
   useEffect(() => { load(); }, []);
 
-  const toggle = async (cc, name, block) => {
-    setToggling(cc);
+  useEffect(() => {
+    if (!input.trim()) { setSuggestions([]); setShowDropdown(false); return; }
+    const q = input.toLowerCase();
+    const matches = countries
+      .filter(c =>
+        (c.name?.toLowerCase().includes(q) || c.code?.toLowerCase().includes(q)) &&
+        !blocked[c.code]
+      )
+      .slice(0, 10);
+    setSuggestions(matches);
+    setShowDropdown(matches.length > 0);
+    setActiveIdx(-1);
+  }, [input, countries, blocked]);
+
+  const addCountry = async (cc, name) => {
+    if (blocked[cc]) return;
+    setInput('');
+    setShowDropdown(false);
     try {
-      await api.post('/api/fail2ban/geo-blocks', { country_code: cc, country_name: name, blocked: block });
-      setBlocked(prev => ({ ...prev, [cc]: block }));
+      await api.post('/api/fail2ban/geo-blocks', { country_code: cc, country_name: name, blocked: true });
+      setBlocked(prev => ({ ...prev, [cc]: true }));
       await api.post('/api/fail2ban/geo-blocks/apply-all');
       await markStep('geo_block_done', true);
     } catch {
-      toast.error(`Failed to ${block ? 'block' : 'unblock'} ${name}`);
-    } finally {
-      setToggling(null);
+      toast.error(`Failed to block ${name}`);
+    }
+  };
+
+  const removeCountry = async (cc, name) => {
+    try {
+      await api.post('/api/fail2ban/geo-blocks', { country_code: cc, country_name: name, blocked: false });
+      setBlocked(prev => ({ ...prev, [cc]: false }));
+      await api.post('/api/fail2ban/geo-blocks/apply-all');
+    } catch {
+      toast.error(`Failed to unblock ${name}`);
+    }
+  };
+
+  const handleKey = (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setActiveIdx(i => Math.min(i + 1, suggestions.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActiveIdx(i => Math.max(i - 1, 0));
+    } else if (e.key === 'Enter' && activeIdx >= 0 && suggestions[activeIdx]) {
+      e.preventDefault();
+      addCountry(suggestions[activeIdx].code, suggestions[activeIdx].name);
+    } else if (e.key === 'Enter' && input.trim()) {
+      e.preventDefault();
+      const exact = countries.find(c =>
+        c.name?.toLowerCase() === input.trim().toLowerCase() && !blocked[c.code]
+      );
+      if (exact) addCountry(exact.code, exact.name);
+    } else if (e.key === 'Escape') {
+      setShowDropdown(false);
     }
   };
 
   if (loading) return <div className="flex items-center gap-2 text-sm text-ink-muted"><Loader size={14} className="animate-spin" /> Loading countries…</div>;
 
-  const filtered = filter
-    ? countries.filter(c => c.name?.toLowerCase().includes(filter.toLowerCase()) || c.code?.toLowerCase().includes(filter.toLowerCase()))
-    : countries;
+  const blockedEntries = Object.entries(blocked).filter(([,v]) => v);
+  const countryName = (cc) => countries.find(c => c.code === cc)?.name || cc;
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-ink-muted">Tap a country to block or unblock it. Blocked countries are denied at the firewall level.</p>
-      <input
-        className="input w-full text-sm"
-        type="text"
-        placeholder="Search countries…"
-        value={filter}
-        onChange={e => setFilter(e.target.value)}
-      />
-      <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
-        {filtered.map(c => (
-          <div key={c.code} className="flex items-center justify-between py-1.5 px-3 rounded-lg hover:bg-panel-elevated transition-colors">
-            <span className="text-sm text-ink-primary">{c.name} <span className="text-ink-faint">{c.code}</span></span>
+      <p className="text-xs text-ink-muted">
+        Type a country name and press Enter to block it. Blocked countries are denied at the firewall level.
+      </p>
+
+      {/* Autocomplete input */}
+      <div className="relative">
+        <input
+          ref={inputRef}
+          className="input w-full text-sm"
+          type="text"
+          placeholder="Type country name… e.g. China, Russia"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={handleKey}
+          onFocus={() => input.trim() && setSuggestions.length > 0 && setShowDropdown(true)}
+          onBlur={() => setTimeout(() => setShowDropdown(false), 200)}
+        />
+        {showDropdown && (
+          <div className="absolute top-full left-0 right-0 mt-1 bg-panel-800 border border-panel-border rounded-lg shadow-xl z-10 max-h-48 overflow-y-auto">
+            {suggestions.map((c, i) => (
+              <button
+                key={c.code}
+                onMouseDown={() => addCountry(c.code, c.name)}
+                className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 transition-colors ${
+                  i === activeIdx ? 'bg-brand/15 text-brand-light' : 'text-ink-primary hover:bg-panel-elevated'
+                }`}
+              >
+                <span>{c.name}</span>
+                <span className="text-ink-faint text-[11px] font-mono">{c.code}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Quick-block chips */}
+      <div>
+        <p className="text-[11px] text-ink-faint mb-1.5">Quick block</p>
+        <div className="flex flex-wrap gap-1.5">
+          {QUICK_BLOCK.map(qb => (
             <button
-              onClick={() => toggle(c.code, c.name, !blocked[c.code])}
-              disabled={toggling === c.code}
+              key={qb.code}
+              onClick={() => {
+                if (blocked[qb.code]) {
+                  removeCountry(qb.code, qb.label);
+                } else {
+                  addCountry(qb.code, qb.label);
+                }
+              }}
               className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                blocked[c.code]
+                blocked[qb.code]
                   ? 'bg-bad/15 text-bad-light border-bad/30'
-                  : 'bg-panel-elevated text-ink-muted border-panel-border hover:text-ink-primary'
+                  : 'bg-panel-elevated text-ink-muted border-panel-border hover:border-ink-faint hover:text-ink-primary'
               }`}
             >
-              {blocked[c.code] ? 'Blocked' : 'Allow'}
+              {qb.label} {blocked[qb.code] ? '✓' : '+'}
             </button>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
-      {Object.keys(blocked).length > 0 && (
-        <div className="flex items-center gap-2 text-ok text-sm">
-          <Check size={14} /> {Object.keys(blocked).length} countr{Object.keys(blocked).length === 1 ? 'y' : 'ies'} blocked
+
+      {/* Blocked pills */}
+      {blockedEntries.length > 0 && (
+        <div>
+          <p className="text-[11px] text-ink-faint mb-1.5">
+            Blocked ({blockedEntries.length})
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {blockedEntries.map(([cc]) => (
+              <span
+                key={cc}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs bg-bad/15 text-bad-light border border-bad/30"
+              >
+                {countryName(cc)}
+                <button
+                  onClick={() => removeCountry(cc, countryName(cc))}
+                  className="hover:text-bright transition-colors leading-none"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -473,6 +711,324 @@ function ServicesStep({ onDone, markStep }) {
   );
 }
 
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Grafana connectivity test — small badge showing [working] / [fail]
+// ═════════════════════════════════════════════════════════════════════════════
+
+function GrafanaTest() {
+  const [status, setStatus] = useState('checking'); // checking | ok | fail
+  const [msg, setMsg] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      if (!cancelled) {
+        setStatus('fail');
+        setMsg('Connection timed out');
+      }
+      controller.abort();
+    }, 5000);
+
+    fetch('http://localhost:3001/api/health', {
+      signal: controller.signal,
+      mode: 'no-cors',
+    })
+      .then(() => {
+        if (!cancelled) {
+          clearTimeout(timeout);
+          setStatus('ok');
+          setMsg('Grafana is responding');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          clearTimeout(timeout);
+          // Fallback: try the Grafana login page
+          fetch('http://localhost:3001/login', { signal: controller.signal })
+            .then(() => { setStatus('ok'); setMsg('Grafana is reachable'); })
+            .catch(() => { setStatus('fail'); setMsg('Cannot reach Grafana'); });
+        }
+      });
+
+    return () => { cancelled = true; clearTimeout(timeout); controller.abort(); };
+  }, []);
+
+  if (status === 'checking') {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-panel-surface border border-panel-subtle">
+        <Loader size={14} className="animate-spin text-ink-muted" />
+        <span className="text-xs text-ink-muted">Testing Grafana connection…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border ${
+      status === 'ok'
+        ? 'bg-ok/10 border-ok/20'
+        : 'bg-error/10 border-error/20'
+    }`}>
+      {status === 'ok' ? (
+        <CheckCircle size={14} className="text-ok shrink-0" />
+      ) : (
+        <XCircle size={14} className="text-error shrink-0" />
+      )}
+      <span className={`text-xs ${status === 'ok' ? 'text-ok' : 'text-error'}`}>
+        Grafana: <strong className="uppercase tracking-wider">{status === 'ok' ? 'working' : 'fail'}</strong>
+        {msg && <span className="text-ink-muted ml-1">— {msg}</span>}
+      </span>
+    </div>
+  );
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// MFA Wizard Step — inline QR scan + verify + recovery codes download
+// ═════════════════════════════════════════════════════════════════════════════
+
+function MfaWizardStep({ onDone }) {
+  const [step, setStep] = useState('start'); // start | qr | recovery | done
+  const [enrollData, setEnrollData] = useState(null);
+  const [verifyCode, setVerifyCode] = useState('');
+  const [verifying, setVerifying] = useState(false);
+  const [recoveryCodes, setRecoveryCodes] = useState(null);
+  const [error, setError] = useState(null);
+
+  const startEnroll = async () => {
+    setError(null);
+    try {
+      const res = await api.post('/api/mfa/enroll', null, {
+        params: { device_name: 'Setup Wizard' },
+      });
+      setEnrollData(res.data);
+      setStep('qr');
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to start MFA enrollment.');
+    }
+  };
+
+  const verifyTotp = async () => {
+    if (!verifyCode.trim() || !enrollData) return;
+    setVerifying(true);
+    setError(null);
+    try {
+      const res = await api.post('/api/mfa/verify', {
+        device_id: enrollData.device_id,
+        code: verifyCode.trim(),
+      });
+      if (res.data?.recovery_codes?.length) {
+        setRecoveryCodes(res.data.recovery_codes);
+        setStep('recovery');
+      } else {
+        onDone();
+      }
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Invalid code. Please try again.');
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const downloadRecoveryTxt = () => {
+    if (!recoveryCodes) return;
+    const lines = [
+      'GnuKontrolR - MFA Recovery Codes',
+      '================================',
+      'Generated: ' + new Date().toISOString(),
+      '',
+      'Keep these codes safe and private. Each code can be used ONLY ONCE.',
+      'If you lose access to your authenticator app, enter one of these',
+      'codes during login to regain access to your account.',
+      '',
+      '┌──────────────────────────────────────┐',
+      ...recoveryCodes.map((c, i) => `│  ${String(i + 1).padStart(2, ' ')}.  ${c}  │`),
+      '└──────────────────────────────────────┘',
+      '',
+      'After using a recovery code, generate new codes from the MFA settings page.',
+      'Store this file in a secure location (e.g., password manager, safe).',
+      '',
+    ].join('\n');
+    const blob = new Blob([lines], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'gnukontrolr-mfa-recovery-codes.txt';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  if (step === 'start') {
+    return (
+      <div className="space-y-4">
+        <p className="text-sm text-ink-secondary leading-relaxed">
+          Multi-factor authentication adds an extra layer of security to your account.
+          After setup, you will need both your password <strong>and</strong> a one-time code
+          from your authenticator app to log in.
+        </p>
+        <div className="flex items-start gap-3 px-3 py-2.5 bg-brand/10 border border-brand/20 rounded-lg">
+          <Smartphone size={16} className="text-brand shrink-0 mt-0.5" />
+          <ul className="text-xs text-ink-muted space-y-1">
+            <li>✓ Works with Google Authenticator, Authy, Microsoft Authenticator, etc.</li>
+            <li>✓ Time-based one-time passwords (TOTP) — no internet required after setup</li>
+            <li>✓ 8 recovery codes will be generated — save them securely</li>
+          </ul>
+        </div>
+        <button
+          onClick={startEnroll}
+          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium
+                     bg-brand hover:bg-brand-hover text-white transition-colors"
+        >
+          <Smartphone size={16} />
+          Set Up MFA Now
+        </button>
+      </div>
+    );
+  }
+
+  if (step === 'recovery') {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center gap-2 text-ok">
+          <CheckCircle size={18} />
+          <span className="text-sm font-medium text-ok">MFA Activated Successfully</span>
+        </div>
+
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <Key size={16} className="text-amber-400" />
+            <h3 className="text-sm font-semibold text-ink-primary">Recovery Codes</h3>
+          </div>
+          <p className="text-xs text-ink-muted">
+            These codes can be used <strong className="text-amber-300">once each</strong> if you lose access
+            to your authenticator app. Save them now — they will never be shown again.
+          </p>
+
+          <div className="grid grid-cols-2 gap-1.5">
+            {recoveryCodes.map((code, i) => (
+              <div key={i} className="px-2.5 py-1.5 rounded bg-panel-surface border border-panel-subtle
+                                          font-mono text-xs text-ink-primary tracking-wider text-center">
+                {code.match(/.{1,4}/g).join('-')}
+              </div>
+            ))}
+          </div>
+
+          <div className="flex flex-wrap gap-2 pt-1">
+            <button
+              onClick={downloadRecoveryTxt}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium
+                         bg-brand hover:bg-brand-hover text-white transition-colors"
+            >
+              <Download size={14} />
+              Download Recovery Codes (.txt)
+            </button>
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(recoveryCodes.join('\n'));
+                toast.success('Recovery codes copied!');
+              }}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium
+                         border border-panel-subtle text-ink-primary hover:bg-panel-hover transition-colors"
+            >
+              <Copy size={14} />
+              Copy All
+            </button>
+          </div>
+        </div>
+
+        <button
+          onClick={onDone}
+          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium
+                     bg-ok hover:bg-ok/80 text-white transition-colors"
+        >
+          <CheckCircle size={16} />
+          Done — Mark Step Complete
+        </button>
+      </div>
+    );
+  }
+
+  // step === 'qr'
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-ink-secondary">
+        Scan this QR code with your authenticator app, then enter the 6-digit code below.
+      </p>
+
+      {/* QR Code */}
+      {enrollData?.qrcode_b64 && (
+        <div className="flex justify-center">
+          <div className="p-2 bg-white rounded-xl shadow-lg">
+            <img
+              src={`data:image/png;base64,${enrollData.qrcode_b64}`}
+              alt="MFA QR Code"
+              className="w-44 h-44"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Manual secret fallback */}
+      {enrollData?.secret && (
+        <div className="flex items-center justify-between bg-panel-surface border border-panel-subtle rounded-lg px-3 py-2">
+          <div>
+            <span className="text-xs text-ink-muted">Secret key (manual entry):</span>
+            <code className="ml-2 text-sm font-mono text-ink-primary">{enrollData.secret}</code>
+          </div>
+          <button
+            onClick={() => {
+              navigator.clipboard.writeText(enrollData.secret);
+              toast.success('Secret key copied');
+            }}
+            className="p-1.5 rounded hover:bg-panel-hover text-ink-muted hover:text-ink-primary"
+          >
+            <Copy size={14} />
+          </button>
+        </div>
+      )}
+
+      {/* Error */}
+      {error && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-error/10 border border-error/20 rounded-lg">
+          <XCircle size={14} className="text-error shrink-0" />
+          <span className="text-xs text-error">{error}</span>
+        </div>
+      )}
+
+      {/* Verify code */}
+      <div className="flex items-end gap-3">
+        <div className="space-y-1">
+          <label className="text-xs text-ink-muted">Verification Code</label>
+          <input
+            type="text"
+            value={verifyCode}
+            onChange={(e) => setVerifyCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+            placeholder="000000"
+            maxLength={6}
+            className="w-36 px-3 py-2 rounded-lg bg-panel-surface border border-panel-subtle
+                       text-ink-primary text-center text-xl font-mono tracking-widest
+                       focus:outline-none focus:ring-2 focus:ring-brand/50"
+          />
+        </div>
+        <button
+          onClick={verifyTotp}
+          disabled={verifying || verifyCode.length !== 6}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium
+                     bg-brand hover:bg-brand-hover text-white transition-colors disabled:opacity-50"
+        >
+          {verifying ? (
+            <><Loader size={14} className="animate-spin" /> Verifying…</>
+          ) : (
+            <><CheckCircle size={14} /> Verify &amp; Activate</>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
 export default function SetupWizard() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
@@ -483,6 +1039,7 @@ export default function SetupWizard() {
   const [creatingCrons, setCreatingCrons] = useState(false);
   const [diagnosticResults, setDiagnosticResults] = useState(null);
   const [runningDiag, setRunningDiag] = useState(false);
+  const [dpoEmail, setDpoEmail] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -576,6 +1133,17 @@ export default function SetupWizard() {
       toast.error('Failed to finalize setup: ' + (err?.response?.data?.detail || err.message));
     } finally {
       setCreatingCrons(false);
+    }
+  };
+
+  const resetWizard = async () => {
+    if (!confirm('Reset the setup wizard? All steps will be marked incomplete and the wizard will reappear.')) return;
+    try {
+      await api.post('/api/setup/reset');
+      toast.success('Wizard reset. Reloading…');
+      setTimeout(() => window.location.reload(), 800);
+    } catch (err) {
+      toast.error('Failed to reset: ' + (err?.response?.data?.detail || err.message));
     }
   };
 
@@ -692,19 +1260,24 @@ export default function SetupWizard() {
               )}
 
               {current.id === 'grafana' && !isStepDone(step) && (
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={() => handleAction(current)}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-brand text-white text-sm font-medium hover:bg-brand-light transition-colors"
-                  >
-                    Open Grafana <ExternalLink size={14} />
-                  </button>
-                  <button
-                    onClick={async () => { await markStep(current.field, true); nextStep(); }}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-panel-elevated text-ink-primary text-sm font-medium hover:bg-panel-border transition-colors"
-                  >
-                    <Eye size={14} /> Mark as Reviewed
-                  </button>
+                <div className="space-y-3">
+                  {/* Quick connectivity test */}
+                  <GrafanaTest />
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => handleAction(current)}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-brand text-white text-sm font-medium hover:bg-brand-light transition-colors"
+                    >
+                      Open Grafana <ExternalLink size={14} />
+                    </button>
+                    <button
+                      onClick={async () => { await markStep(current.field, true); nextStep(); }}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-panel-elevated text-ink-primary text-sm font-medium hover:bg-panel-border transition-colors"
+                    >
+                      <Eye size={14} /> Mark as Reviewed
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -764,6 +1337,73 @@ export default function SetupWizard() {
                 <ServicesStep onDone={nextStep} markStep={markStep} />
               )}
 
+              {current.id === 'dsar_contact' && (
+                <div className="space-y-3">
+                  <p className="text-sm text-ink-secondary">
+                    Set the Data Protection Officer (DPO) contact email for handling privacy requests
+                    and breach notifications.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="email"
+                      value={dpoEmail}
+                      onChange={(e) => setDpoEmail(e.target.value)}
+                      placeholder="dpo@example.com"
+                      className="flex-1 max-w-xs px-3 py-2 rounded-lg bg-panel-surface border border-panel-subtle
+                                 text-ink-primary placeholder-ink-muted text-sm
+                                 focus:outline-none focus:ring-2 focus:ring-brand/50"
+                    />
+                    <button
+                      onClick={() => {
+                        if (dpoEmail.trim()) {
+                          toast.success('DSAR contact saved. Update .env BREACH_NOTIFICATION_EMAIL for persistence.');
+                          markStep(step);
+                        }
+                      }}
+                      disabled={!dpoEmail.trim()}
+                      className="px-4 py-2 rounded-lg text-sm font-medium bg-brand hover:bg-brand-hover
+                                 text-white transition-colors disabled:opacity-50"
+                    >
+                      Save Contact
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {current.id === 'data_retention' && (
+                <div className="space-y-3">
+                  <p className="text-sm text-ink-secondary">
+                    Data retention policies ensure compliance with GDPR, SOC 2, and ISO 27001.
+                    The following schedules are configured:
+                  </p>
+                  <ul className="text-xs text-ink-muted space-y-1 list-disc pl-4">
+                    <li>Request logs: 12 months</li>
+                    <li>Consent records: 3 years</li>
+                    <li>Completed DSARs: 1 year</li>
+                    <li>Suspended accounts: 90-day grace period</li>
+                    <li>Password history: last 5 passwords blocked from reuse</li>
+                  </ul>
+                </div>
+              )}
+
+              {current.id === 'privacy_policy' && (
+                <div className="space-y-3">
+                  <p className="text-sm text-ink-secondary">
+                    Review and accept the platform Privacy Policy to record your consent.
+                  </p>
+                  <a
+                    href="/privacy/privacy-policy"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium
+                               bg-brand hover:bg-brand-hover text-white transition-colors"
+                  >
+                    <FileText size={16} />
+                    View Privacy Policy
+                  </a>
+                </div>
+              )}
+
               {isStepDone(step) && !current.interactive && current.id !== 'grafana' && (
                 <div className="flex items-center gap-2 text-ok text-sm">
                   <Check size={14} />
@@ -816,7 +1456,7 @@ export default function SetupWizard() {
               </button>
             ) : step < totalSteps - 1 ? (
               <>
-                {current.interactive ? (
+                {current.interactive && !isStepDone(step) ? (
                   <button
                     onClick={skipStep}
                     className="px-3 py-1.5 text-xs text-ink-muted hover:text-ink-secondary transition-colors"
@@ -854,6 +1494,14 @@ export default function SetupWizard() {
                 className="inline-flex items-center gap-1 px-3 py-1.5 text-xs text-ink-muted hover:text-ink-secondary transition-colors"
               >
                 <ChevronLeft size={14} /> Back
+              </button>
+            )}
+            {diagnosticResults && (
+              <button
+                onClick={resetWizard}
+                className="px-3 py-1.5 text-[10px] text-ink-faint hover:text-error transition-colors ml-auto"
+              >
+                Reset Setup Wizard
               </button>
             )}
           </div>

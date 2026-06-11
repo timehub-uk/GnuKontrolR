@@ -7,6 +7,7 @@ import {
   HardDrive, Terminal, Settings, LogOut,
   Package, Eye, Activity, Shield, ChevronRight, ChevronLeft, Cpu,
   LayoutGrid, PanelLeftClose, PanelLeftOpen, BrainCircuit, Stethoscope, Bell, Network, Bot, Clock,
+  Smartphone, FileText, Cookie, ClipboardList,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import AiPanel from './AiPanel';
@@ -74,6 +75,17 @@ const NAV_GROUPS = [
     ],
   },
   {
+    label: 'Privacy',
+    items: [
+      { to: '/mfa',                    icon: Smartphone,    label: 'MFA Setup'     },
+      { to: '/privacy/privacy-policy',  icon: Shield,       label: 'Privacy Policy' },
+      { to: '/privacy/terms-of-service', icon: FileText,    label: 'Terms of Service' },
+      { to: '/privacy/cookies',         icon: Cookie,       label: 'Cookie Settings' },
+      { to: '/privacy/data-export',     icon: Shield,       label: 'Data & Privacy' },
+      { to: '/privacy/dsar',            icon: ClipboardList, label: 'Data Request'  },
+    ],
+  },
+  {
     label: 'Admin',
     items: [
       { to: '/notifications', icon: Bell,     label: 'Notifications', adminOnly: true },
@@ -96,6 +108,12 @@ const ROUTE_LABELS = {
   '/networking': 'Networking', '/ai-containers': 'AI Containers',
   '/crons': 'Cron Jobs',
   '/plans': 'Hosting Plans',
+  '/mfa': 'Multi-Factor Authentication',
+  '/privacy/privacy-policy': 'Privacy Policy',
+  '/privacy/terms-of-service': 'Terms of Service',
+  '/privacy/cookies': 'Cookie Preferences',
+  '/privacy/data-export': 'Data & Privacy',
+  '/privacy/dsar': 'Data Subject Request',
 };
 
 // ── NavItem — full or icon-only ───────────────────────────────────────────────
@@ -361,6 +379,7 @@ export default function Layout({ children }) {
         </div>
       </main>
 
+      <CookieConsentBanner />
       <AiPanel />
       <CommandPalette />
       <SetupWizard />

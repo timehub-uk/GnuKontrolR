@@ -16,3 +16,5 @@ pydantic[email]==2.7.1
 redis[asyncio]==5.0.4
 prometheus-client==0.20.0
 docker==7.1.0
+pyotp==2.9.0
+qrcode[pil]==7.4.2
