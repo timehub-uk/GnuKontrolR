@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect } from 'react';
+import { toast } from 'sonner';
 import api from '../utils/api';
 
 const AuthContext = createContext(null);
@@ -39,11 +40,40 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
+    api.post('/api/auth/logout').catch(() => {});
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
     delete api.defaults.headers.common['Authorization'];
     setUser(null);
   };
+
+  // Enforce SOC 2 session timeout: auto-logout after 15 minutes of inactivity
+  useEffect(() => {
+    if (!user) return;
+
+    let timeoutId;
+    const INACTIVITY_TIMEOUT = 15 * 60 * 1000; // 15 minutes in ms
+
+    const resetTimer = () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+        logout();
+        toast.warning('Logged out due to 15 minutes of inactivity.');
+      }, INACTIVITY_TIMEOUT);
+    };
+
+    // Human activity listeners
+    const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart'];
+    events.forEach(name => document.addEventListener(name, resetTimer));
+
+    // Initialize timer
+    resetTimer();
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      events.forEach(name => document.removeEventListener(name, resetTimer));
+    };
+  }, [user]);
 
   return (
     <AuthContext.Provider value={{ user, login, logout, loading, refreshUser }}>

@@ -17,7 +17,7 @@ from app.models.password_policy import PasswordHistory
 from app.auth import (
     verify_password, hash_password,
     create_access_token, create_refresh_token, create_mfa_token,
-    get_current_user, validate_password_strength,
+    get_current_user, validate_password_strength, oauth2_scheme,
 )
 from app.cache import get_redis
 import pyotp
@@ -377,3 +377,28 @@ async def change_password(
     await db.commit()
 
     return {"ok": True, "message": "Password changed successfully."}
+
+
+@router.post("/logout", status_code=204)
+async def logout(
+    request: Request,
+    current: User = Depends(get_current_user),
+    token: str = Depends(oauth2_scheme),
+):
+    """Logout the user and invalidate the JWT token via Redis blocklist."""
+    from app.auth import SECRET_KEY, ALGORITHM
+    from jose import jwt
+    r = await get_redis()
+    if r is not None:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            exp = payload.get("exp", 0)
+            now = datetime.utcnow().timestamp()
+            ttl = int(exp - now) if exp > now else 3600
+            # Blacklist the token in Redis
+            await r.setex(f"token:blacklisted:{token}", ttl, 1)
+        except Exception as e:
+            # log warning
+            import logging
+            logging.getLogger("webpanel.auth").warning("Failed to blacklist token: %s", e)
+    return

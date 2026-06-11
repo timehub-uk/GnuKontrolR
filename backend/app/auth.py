@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.models.user import User, Role
+from app.cache import get_redis
 
 _DEFAULT_KEY   = "change-me-in-production-use-32-char-secret"
 SECRET_KEY     = os.environ.get("SECRET_KEY", _DEFAULT_KEY)
@@ -31,7 +32,7 @@ if SECRET_KEY == _DEFAULT_KEY:
             "Set a strong random SECRET_KEY before deploying to production."
         )
 ALGORITHM      = "HS256"
-ACCESS_EXPIRE  = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
+ACCESS_EXPIRE  = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", 15))
 REFRESH_EXPIRE = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", 7))
 
 pwd_context    = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -104,6 +105,19 @@ async def get_current_user(
         detail="Invalid or expired token",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    
+    # Check Redis blacklist for logged-out tokens
+    r = await get_redis()
+    if r is not None:
+        try:
+            is_blocked = await r.get(f"token:blacklisted:{token}")
+            if is_blocked:
+                raise credentials_exc
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         if payload.get("type") != "access":
