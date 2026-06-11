@@ -831,7 +831,7 @@ async def sync_all_domains(domains: list["Domain"], server_ip: str = "") -> dict
                 existing_zones.add(z["id"].rstrip("."))
         except httpx.HTTPError as exc:
             log.error("PowerDNS zone list failed: %s", exc)
-            errors.append(f"zone-list: {exc}")
+            errors.append("PowerDNS zone list request failed")
             return {"provisioned": provisioned, "deleted": deleted, "errors": errors}
 
     db_names = {d.name for d in domains}
@@ -869,7 +869,7 @@ async def sync_all_domains(domains: list["Domain"], server_ip: str = "") -> dict
                 log.info("DNS sync: removed stale zone %s", name)
             except httpx.HTTPError as exc:
                 log.error("DNS sync delete failed for %s: %s", name, exc)
-                errors.append(f"{name} (delete): {exc}")
+                errors.append(f"{name} (delete): PowerDNS zone delete failed")
 
     # Sync panel NS glue zone once after all customer domains are provisioned
     if ip:

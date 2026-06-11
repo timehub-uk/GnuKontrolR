@@ -184,6 +184,10 @@ async def list_files(
     """List files/directories inside a domain's file tree."""
     _decode_pin_token(x_content_token)
     target = _safe_path(domain, path)
+    target_str = str(target)
+    root_resolved = str(Path(SITES_ROOT).resolve())
+    if not (target_str == root_resolved or target_str.startswith(root_resolved + "/")):
+        raise HTTPException(400, "Path traversal detected")
     if not target.exists():
         raise HTTPException(404, "Path not found")
     if not target.is_dir():
@@ -217,6 +221,10 @@ async def read_file(
     """Read a text file from a domain's file tree."""
     _decode_pin_token(x_content_token)
     target = _safe_path(domain, path)
+    target_str = str(target)
+    root_resolved = str(Path(SITES_ROOT).resolve())
+    if not (target_str == root_resolved or target_str.startswith(root_resolved + "/")):
+        raise HTTPException(400, "Path traversal detected")
     if not target.exists():
         raise HTTPException(404, "File not found")
     if not target.is_file():

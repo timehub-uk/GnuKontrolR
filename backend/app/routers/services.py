@@ -242,14 +242,30 @@ async def service_action(
     user: User = Depends(get_current_user),
 ):
     """Enable, disable, install, or uninstall a service on a domain container."""
-    info = CATALOGUE.get(service_id)
-    if not info:
+    safe_service_id = None
+    for k in CATALOGUE.keys():
+        if k == service_id:
+            safe_service_id = k
+            break
+    if not safe_service_id:
         raise HTTPException(404, f"Unknown service: {service_id}")
+
+    info = CATALOGUE[safe_service_id]
 
     if info.get("always_installed"):
         return {"ok": True, "message": f"{info['name']} is always available."}
 
-    action = body.action.lower()
+    action_map = {
+        "enable": "enable",
+        "disable": "disable",
+        "install": "install",
+        "uninstall": "uninstall",
+        "start": "enable",
+        "stop": "disable",
+    }
+    action = action_map.get(body.action.lower())
+    if not action:
+        raise HTTPException(400, f"Unknown action: {body.action}")
 
     if action in ("enable", "start"):
         # ── Web server: switch active server ──────────────────────────────
@@ -307,9 +323,15 @@ async def service_action(
 @router.get("/{domain}/{service_id}/status")
 async def service_status(domain: str, service_id: str, _=Depends(get_current_user)):
     """Check status of a specific service in a domain container."""
-    info = CATALOGUE.get(service_id)
-    if not info:
+    safe_service_id = None
+    for k in CATALOGUE.keys():
+        if k == service_id:
+            safe_service_id = k
+            break
+    if not safe_service_id:
         raise HTTPException(404, f"Unknown service: {service_id}")
+
+    info = CATALOGUE[safe_service_id]
 
     if "supervisor_program" in info:
         code, out, _ = _run_in_container(domain, [

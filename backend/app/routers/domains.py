@@ -210,7 +210,7 @@ def _write_traefik_resolver(domain_name: str, owner_email: str) -> None:
     try:
         base_dir = os.path.abspath(_TRAEFIK_DYNAMIC_DIR)
         path = os.path.abspath(os.path.join(base_dir, f"acme_{safe}.yml"))
-        if os.path.commonpath([base_dir, path]) != base_dir:
+        if not (path == base_dir or path.startswith(base_dir + "/")):
             log.warning("Path traversal attempt in _write_traefik_resolver: %s", path)
             return
         with open(path, "w") as f:

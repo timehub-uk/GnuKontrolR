@@ -255,13 +255,13 @@ async def get_ip_status():
 async def trigger_ip_sync():
     """Manually trigger a full IP detection + DNS sync (superadmin only)."""
     global _last_known_ipv4, _last_known_ipv6, _last_known_internal
-    ipv4, ipv6, internal = await asyncio.gather(
+    results = await asyncio.gather(
         get_external_ip(), get_external_ipv6(), get_internal_ip(),
         return_exceptions=True,
     )
-    ipv4     = ipv4     if isinstance(ipv4, str)     else ""
-    ipv6     = ipv6     if isinstance(ipv6, str)     else ""
-    internal = internal if isinstance(internal, str) else ""
+    ipv4     = str(results[0]) if isinstance(results[0], str) else ""
+    ipv6     = str(results[1]) if isinstance(results[1], str) else ""
+    internal = str(results[2]) if isinstance(results[2], str) else ""
 
     update_effective_ip(ipv4, internal)
     _update_env_ip(ipv4, ipv6)

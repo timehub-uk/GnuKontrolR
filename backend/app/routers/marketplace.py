@@ -923,11 +923,9 @@ def _get_token(domain: str) -> str:
     safe_domain = re.sub(r'[^a-zA-Z0-9_.-]', '_', domain)
     base_dir = pathlib.Path("/var/tokens").resolve()
     token_file = (base_dir / f"{safe_domain}.token").resolve()
-    try:
-        common = os.path.commonpath([str(base_dir), str(token_file)])
-        if common != str(base_dir):
-            raise ValueError("Path traversal detected")
-    except ValueError:
+    token_file_str = str(token_file)
+    base_dir_str = str(base_dir)
+    if not (token_file_str == base_dir_str or token_file_str.startswith(base_dir_str + "/")):
         raise ValueError("Path traversal detected")
     if token_file.exists():
         return token_file.read_text().strip()

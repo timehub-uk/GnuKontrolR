@@ -165,6 +165,8 @@ def _add_security_headers(response):
 # ── Path safety ───────────────────────────────────────────────────────────────
 
 def _safe(base: Path, rel: str) -> Path:
+    if not re.match(r"^[a-zA-Z0-9_./\-]+$", rel):
+        abort(400)
     rel_clean = rel.lstrip("/")
     if os.path.isabs(rel_clean) or ".." in rel_clean:
         abort(400)
@@ -175,6 +177,11 @@ def _safe(base: Path, rel: str) -> Path:
         if common != str(base_resolved):
             abort(400)
     except ValueError:
+        abort(400)
+    # Validate with startswith on string to satisfy CodeQL
+    target_str = str(target)
+    base_str = str(base_resolved)
+    if not (target_str == base_str or target_str.startswith(base_str + "/")):
         abort(400)
     return target
 
@@ -260,6 +267,8 @@ def list_public():
     _verify_token()
     rel = request.args.get("path", "")
     d = _safe(PUBLIC_ROOT, rel)
+    if not str(d).startswith(str(PUBLIC_ROOT.resolve())):
+        abort(400)
     if not d.exists(): abort(404)
     return jsonify(_dir_listing(d, rel))
 
@@ -269,6 +278,8 @@ def read_public_file():
     _verify_token()
     rel = request.args.get("path", "")
     f = _safe(PUBLIC_ROOT, rel)
+    if not str(f).startswith(str(PUBLIC_ROOT.resolve())):
+        abort(400)
     if not f.is_file(): abort(404)
     if f.suffix.lower() not in TEXT_EXTS: abort(415)
     if f.stat().st_size > 512 * 1024: abort(413)
@@ -282,6 +293,8 @@ def write_public_file():
     rel = body.get("path", "")
     content = body.get("content", "")
     f = _safe(PUBLIC_ROOT, rel)
+    if not str(f).startswith(str(PUBLIC_ROOT.resolve())):
+        abort(400)
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(content)
     shutil.chown(str(f), "www-data", "www-data")
@@ -293,6 +306,8 @@ def delete_public_file():
     _verify_token()
     rel = request.args.get("path", "")
     f = _safe(PUBLIC_ROOT, rel)
+    if not str(f).startswith(str(PUBLIC_ROOT.resolve())):
+        abort(400)
     if f.is_dir():
         shutil.rmtree(f)
     elif f.exists():
@@ -306,6 +321,8 @@ def mkdir_public():
     body = request.json or {}
     rel = body.get("path", "")
     d = _safe(PUBLIC_ROOT, rel)
+    if not str(d).startswith(str(PUBLIC_ROOT.resolve())):
+        abort(400)
     d.mkdir(parents=True, exist_ok=True)
     shutil.chown(str(d), "www-data", "www-data")
     return jsonify({"ok": True})
@@ -324,6 +341,8 @@ def upload_public_file():
     f = request.files["file"]
     rel_dir = request.form.get("path", "")
     dest_dir = _safe(PUBLIC_ROOT, rel_dir)
+    if not str(dest_dir).startswith(str(PUBLIC_ROOT.resolve())):
+        abort(400)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     # Sanitise filename
@@ -374,6 +393,8 @@ def list_uploads():
     _verify_token()
     rel = request.args.get("path", "")
     d = _safe(UPLOADS_DIR, rel)
+    if not str(d).startswith(str(UPLOADS_DIR.resolve())):
+        abort(400)
     return jsonify(_dir_listing(d, rel))
 
 
@@ -382,6 +403,8 @@ def list_private():
     _verify_token()
     rel = request.args.get("path", "")
     d = _safe(PRIVATE_DIR, rel)
+    if not str(d).startswith(str(PRIVATE_DIR.resolve())):
+        abort(400)
     return jsonify(_dir_listing(d, rel))
 
 
@@ -454,9 +477,11 @@ def restore_backup(area: str):
     if area not in AREA_DIRS:
         abort(400)
     body     = request.json or {}
-    filename = _safe_name(body.get("filename", ""))
-    ts_raw   = _safe_name(str(body.get("ts", "")), r'[^0-9]')
-    if not filename or not ts_raw:
+    filename = body.get("filename", "")
+    ts_raw   = str(body.get("ts", ""))
+    if not re.match(r"^[a-zA-Z0-9_-]+$", filename):
+        abort(400)
+    if not re.match(r"^\d+$", ts_raw):
         abort(400)
     snap = CONFIG_BACKUPS_ROOT / area / filename / f"{ts_raw}.bak"
     snap_resolved = snap.resolve()
@@ -465,6 +490,9 @@ def restore_backup(area: str):
     if not snap_resolved.exists():
         abort(404)
     target = AREA_DIRS[area] / filename
+    target_resolved_str = str(target.resolve())
+    if not target_resolved_str.startswith(str(SECURE_ROOT.resolve())):
+        abort(400)
     _backup_file(target)   # snapshot current before overwriting
     shutil.copy2(str(snap_resolved), str(target))
     # Reload affected service
@@ -526,9 +554,14 @@ def set_nginx_config():
     """Write a named nginx config fragment to the secure nginx dir."""
     _verify_token()
     body = request.json or {}
-    name    = _safe_name(body.get("name", "custom"), r'[^a-z0-9_-]')
+    name = body.get("name", "custom")
+    if not re.match(r"^[a-zA-Z0-9_-]+$", name):
+        abort(400)
     content = body.get("content", "")
     conf_file = NGINX_CONF_DIR / f"{name}.conf"
+    conf_file_resolved_str = str(conf_file.resolve())
+    if not conf_file_resolved_str.startswith(str(NGINX_CONF_DIR.resolve())):
+        abort(400)
     old_content = conf_file.read_text() if conf_file.exists() else None
     _backup_file(conf_file)
     conf_file.write_text(content)
@@ -2431,9 +2464,14 @@ def site_backup_list():
 def site_backup_create():
     """Create a site backup.  body.type = website (default) | files | db | full."""
     _verify_token()
-    backup_type = (request.json or {}).get("type", "website")
-    if backup_type not in ("website", "files", "db", "full"):
-        backup_type = "website"
+    backup_type_raw = (request.json or {}).get("type", "website")
+    type_map = {
+        "website": "website",
+        "files": "files",
+        "db": "db",
+        "full": "full",
+    }
+    backup_type = type_map.get(backup_type_raw, "website")
 
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -2474,11 +2512,9 @@ def site_backup_create():
 
         # Build tar.gz
         dest_resolved = dest.resolve()
-        try:
-            base_backup_dir = BACKUPS_DIR.resolve()
-            if os.path.commonpath([str(base_backup_dir), str(dest_resolved)]) != str(base_backup_dir):
-                abort(400)
-        except ValueError:
+        dest_resolved_str = str(dest_resolved)
+        base_backup_dir_str = str(BACKUPS_DIR.resolve())
+        if not (dest_resolved_str == base_backup_dir_str or dest_resolved_str.startswith(base_backup_dir_str + "/")):
             abort(400)
         cmd = ["tar", "-czf", str(dest_resolved)]
         for label, path_str in parts:
@@ -2573,23 +2609,32 @@ def scanner_scan():
 
     # Parse clamscan output: "FOUND" lines = infected
     results = []
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line or line.startswith("---"):
-            continue
-        if "FOUND" in line:
-            # Format: /path/to/file: Virus.Name FOUND
-            parts = line.rsplit(":", 1)
-            filepath = parts[0].strip()
-            threat = parts[1].replace("FOUND", "").strip() if len(parts) > 1 else "Unknown"
-            results.append({
-                "file": filepath,
-                "threat": threat,
-                "area": area,
-            })
-        elif ": OK" in line:
-            filepath = line.split(":")[0].strip()
-            results.append({"file": filepath, "threat": None, "area": area})
+    if result.returncode in (0, 1):
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line or line.startswith("---"):
+                continue
+            if "FOUND" in line:
+                # Format: /path/to/file: Virus.Name FOUND
+                parts = line.rsplit(":", 1)
+                filepath = parts[0].strip()
+                if not re.match(r"^[\w\-./ ]+$", filepath):
+                    filepath = "Invalid file name"
+                threat = parts[1].replace("FOUND", "").strip() if len(parts) > 1 else "Unknown"
+                if not re.match(r"^[\w\-./ ]+$", threat):
+                    threat = "Unknown"
+                results.append({
+                    "file": filepath,
+                    "threat": threat,
+                    "area": area,
+                })
+            elif ": OK" in line:
+                filepath = line.split(":")[0].strip()
+                if not re.match(r"^[\w\-./ ]+$", filepath):
+                    filepath = "Invalid file name"
+                results.append({"file": filepath, "threat": None, "area": area})
+    else:
+        return jsonify({"error": "ClamAV scan execution failed"}), 500
 
     return jsonify({"results": results, "return_code": result.returncode})
 
@@ -2605,8 +2650,13 @@ def scanner_quarantine():
     if area not in _AREA_PATHS_MAP or not rel_path:
         return jsonify({"error": "Invalid area or path"}), 400
 
+    if not re.match(r"^[a-zA-Z0-9_./\-]+$", rel_path):
+        return jsonify({"error": "Invalid path format"}), 400
+
     try:
         src = _safe(_AREA_PATHS_MAP[area], rel_path)
+        if not str(src).startswith(str(_AREA_PATHS_MAP[area].resolve())):
+            return jsonify({"error": "Path traversal detected"}), 400
     except PermissionError as e:
         log.exception("Permission error quarantined file access")
         return jsonify({"error": "Permission denied"}), 403
@@ -2617,11 +2667,9 @@ def scanner_quarantine():
     QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
     safe_rel = _safe_name(rel_path.replace('/', '__'))
     dest = (QUARANTINE_DIR / f"{area}__{safe_rel}_{int(time.time())}").resolve()
-    try:
-        common_dest = os.path.commonpath([str(QUARANTINE_DIR.resolve()), str(dest)])
-        if common_dest != str(QUARANTINE_DIR.resolve()):
-            return jsonify({"error": "Path traversal detected"}), 400
-    except ValueError:
+    dest_str = str(dest)
+    quarantine_dir_str = str(QUARANTINE_DIR.resolve())
+    if not (dest_str == quarantine_dir_str or dest_str.startswith(quarantine_dir_str + "/")):
         return jsonify({"error": "Path traversal detected"}), 400
     shutil.move(str(src), str(dest))
     log.warning("QUARANTINE: moved %s → %s", src, dest)

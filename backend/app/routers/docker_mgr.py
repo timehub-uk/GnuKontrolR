@@ -134,6 +134,8 @@ def resolve_container(name_or_domain: str) -> str:
     If the value already looks like a container name (contains no dots and
     starts with a known prefix, or was passed as a raw container name from
     the list endpoint) return it as-is.  Otherwise treat it as a domain."""
+    if not re.match(r"^[a-zA-Z0-9_.-]+$", name_or_domain):
+        raise ValueError("Invalid container name")
     # Raw container names passed from the list page have no dots and are not
     # domain-like (e.g. "webpanel_api", "site_example_com").
     if "." not in name_or_domain:
@@ -318,6 +320,8 @@ async def list_containers(_=Depends(require_admin)):
 
 @router.get("/containers/{domain}")
 async def get_container(domain: str, db=Depends(get_db), current: User = Depends(get_current_user)):
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        raise HTTPException(400, "Invalid domain name")
     if current.role not in (Role.superadmin, Role.admin):
         result = await db.execute(select(Domain).where(Domain.name == domain, Domain.owner_id == current.id))
         if not result.scalar_one_or_none():
@@ -555,17 +559,30 @@ class ContainerAction(BaseModel):
 
 @router.post("/containers/{domain}/action")
 async def container_action(domain: str, body: ContainerAction, _=Depends(require_admin)):
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        raise HTTPException(400, "Invalid domain name")
     name = resolve_container(domain)
-    if body.action not in ("start", "stop", "restart", "pause", "unpause", "kill"):
+    action_map = {
+        "start": "start",
+        "stop": "stop",
+        "restart": "restart",
+        "pause": "pause",
+        "unpause": "unpause",
+        "kill": "kill",
+    }
+    action = action_map.get(body.action)
+    if not action:
         raise HTTPException(400, "Invalid action")
-    code, out, err = _run(["docker", body.action, name])
+    code, out, err = _run(["docker", action, name])
     if code != 0:
         raise HTTPException(500, err)
-    return {"ok": True, "container": name, "action": body.action}
+    return {"ok": True, "container": name, "action": action}
 
 
 @router.delete("/containers/{domain}")
 async def delete_domain_container(domain: str, db=Depends(get_db), _=Depends(require_admin)):
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        raise HTTPException(400, "Invalid domain name")
     name = container_name(domain)
     _run(["docker", "stop", name])
     code, out, err = _run(["docker", "rm", "-f", name])
@@ -580,9 +597,14 @@ async def delete_domain_container(domain: str, db=Depends(get_db), _=Depends(req
 
 @router.get("/containers/{domain}/logs")
 async def container_logs(domain: str, tail: int = 100, _=Depends(require_admin)):
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        raise HTTPException(400, "Invalid domain name")
     tail = min(max(tail, 1), 1000)
+    tail_str = str(tail)
+    if not re.match(r"^\d+$", tail_str):
+        raise HTTPException(400, "Invalid tail parameter")
     name = resolve_container(domain)
-    code, out, err = _run(["docker", "logs", "--tail", str(tail), name])
+    code, out, err = _run(["docker", "logs", "--tail", tail_str, name])
     return {"logs": out, "stderr": err}
 
 
@@ -651,6 +673,8 @@ async def revoke_admin_ssh_key(domain: str, _=Depends(require_admin)):
 
 @router.get("/containers/{domain}/stats")
 async def container_stats(domain: str, db=Depends(get_db), current: User = Depends(get_current_user)):
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        raise HTTPException(400, "Invalid domain name")
     if current.role not in (Role.superadmin, Role.admin):
         result = await db.execute(select(Domain).where(Domain.name == domain, Domain.owner_id == current.id))
         if not result.scalar_one_or_none():

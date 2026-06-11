@@ -130,6 +130,9 @@ def _is_safe_domain(domain: str) -> bool:
 
 async def _check_http_headers(domain: str) -> list[dict]:
     """Check for security HTTP headers."""
+    if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        return [{"id": "header_ssrf_blocked", "severity": "medium", "title": "SSRF Blocked",
+                 "message": f"Refused to check headers for {domain}: not a public domain"}]
     if not _is_safe_domain(domain):
         return [{"id": "header_ssrf_blocked", "severity": "medium", "title": "SSRF Blocked",
                  "message": f"Refused to check headers for {domain}: not a public domain"}]
