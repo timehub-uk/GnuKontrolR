@@ -799,6 +799,21 @@ function MfaWizardStep({ onDone }) {
   const [verifying, setVerifying] = useState(false);
   const [recoveryCodes, setRecoveryCodes] = useState(null);
   const [error, setError] = useState(null);
+  const [expectedCode, setExpectedCode] = useState('');
+
+  useEffect(() => {
+    if (step !== 'qr' || !enrollData) return;
+    setExpectedCode(enrollData.expected_code || '');
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await api.get(`/api/mfa/expected-code/${enrollData.device_id}`);
+        setExpectedCode(res.data.expected_code || '');
+      } catch { /* ignore */ }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [step, enrollData]);
 
   const startEnroll = async () => {
     setError(null);
@@ -1003,7 +1018,14 @@ function MfaWizardStep({ onDone }) {
       {/* Verify code */}
       <div className="flex items-end gap-3">
         <div className="space-y-1">
-          <label className="text-xs text-ink-muted">Verification Code</label>
+          <label className="text-xs text-ink-muted flex items-center gap-1.5">
+            <span>Verification Code</span>
+            {expectedCode && (
+              <span className="text-[10px] text-brand-light font-mono select-all">
+                (expected code {expectedCode})
+              </span>
+            )}
+          </label>
           <input
             type="text"
             value={verifyCode}
@@ -1044,6 +1066,23 @@ export default function SetupWizard() {
   const [diagnosticResults, setDiagnosticResults] = useState(null);
   const [runningDiag, setRunningDiag] = useState(false);
   const [dpoEmail, setDpoEmail] = useState('');
+  const [hasScrolledToBottom, setHasScrolledToBottom] = useState(false);
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
+  const privacyScrollRef = useRef(null);
+
+  useEffect(() => {
+    setHasScrolledToBottom(false);
+    setPrivacyAccepted(false);
+  }, [step]);
+
+  useEffect(() => {
+    if (STEPS[step]?.id === 'privacy_policy' && privacyScrollRef.current) {
+      const el = privacyScrollRef.current;
+      if (el.scrollHeight <= el.clientHeight) {
+        setHasScrolledToBottom(true);
+      }
+    }
+  }, [step]);
 
   useEffect(() => {
     (async () => {
@@ -1077,8 +1116,17 @@ export default function SetupWizard() {
     return stepState[s.field] === true;
   };
 
-  const nextStep = () => {
-    if (step < totalSteps - 1) setStep(s => s + 1);
+  const nextStep = async () => {
+    if (step < totalSteps - 1) {
+      const s = STEPS[step];
+      if (s.id === 'services' && !isStepDone(step)) {
+        await markStep(s.field, false);
+      }
+      if (s.id === 'privacy_policy' && !isStepDone(step)) {
+        await markStep(s.field, true);
+      }
+      setStep(prev => prev + 1);
+    }
   };
 
   const prevStep = () => {
@@ -1088,6 +1136,14 @@ export default function SetupWizard() {
   const skipStep = async () => {
     await markStep(STEPS[step].field, false);
     nextStep();
+  };
+
+  const handleScroll = (e) => {
+    const el = e.target;
+    const isAtBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 5;
+    if (isAtBottom) {
+      setHasScrolledToBottom(true);
+    }
   };
 
   const handleAction = (s) => {
@@ -1361,7 +1417,7 @@ export default function SetupWizard() {
                       onClick={() => {
                         if (dpoEmail.trim()) {
                           toast.success('DSAR contact saved. Update .env BREACH_NOTIFICATION_EMAIL for persistence.');
-                          markStep(step);
+                          markStep(current.field);
                         }
                       }}
                       disabled={!dpoEmail.trim()}
@@ -1395,17 +1451,76 @@ export default function SetupWizard() {
                   <p className="text-sm text-ink-secondary">
                     Review and accept the platform Privacy Policy to record your consent.
                   </p>
-                  <a
-                    href="/privacy/privacy-policy"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium
-                               bg-brand hover:bg-brand-hover text-white transition-colors"
+                  <div
+                    ref={privacyScrollRef}
+                    onScroll={handleScroll}
+                    className="h-32 overflow-y-auto border border-panel-border p-3 rounded-lg text-[11px] font-mono text-ink-secondary bg-panel-elevated leading-relaxed whitespace-pre-wrap"
                   >
-                    <FileText size={16} />
-                    View Privacy Policy
-                  </a>
+{`GnuKontrolR Privacy Policy Basics
+
+1. Data Collection
+We collect system configuration, domain configurations, user emails, and system operation logs to provide container hosting and DNS management services.
+
+2. Data Retention
+- System request logs: Retained for 12 months.
+- Account information: Retained for the duration of the active account.
+- Consent records: Retained for 3 years to comply with GDPR/SOC 2 standards.
+
+3. Data Subject Rights
+You can request access, correction, or deletion of your personal data at any time via the Privacy section of the dashboard or by contacting the DPO.
+
+4. Security Measures
+All credentials and secrets are encrypted at rest using AES-256 (Fernet) and TLS 1.2+ is enforced for all external communications.
+
+5. Compliance & Third-Parties
+We do not sell or share your personal data with third parties. All operational data is stored securely on your local instance.`}
+                  </div>
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="accept-privacy-policy"
+                        checked={privacyAccepted || isStepDone(step)}
+                        disabled={isStepDone(step) || !hasScrolledToBottom}
+                        onChange={(e) => setPrivacyAccepted(e.target.checked)}
+                        className="w-4 h-4 rounded border-panel-subtle bg-panel-surface text-brand focus:ring-brand/50 focus:ring-offset-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      />
+                      <label
+                        htmlFor="accept-privacy-policy"
+                        className={`text-xs select-none cursor-pointer ${
+                          !hasScrolledToBottom && !isStepDone(step)
+                            ? 'text-ink-muted cursor-not-allowed'
+                            : 'text-ink-secondary hover:text-ink-primary'
+                        }`}
+                      >
+                        {!hasScrolledToBottom && !isStepDone(step)
+                          ? 'Please scroll to the bottom of the policy to accept'
+                          : 'I accept the Privacy Policy'}
+                      </label>
+                    </div>
+                    {isStepDone(step) && (
+                      <div className="flex items-center gap-1.5 text-ok text-xs">
+                        <CheckCircle size={14} /> Accepted &amp; Consent Recorded
+                      </div>
+                    )}
+                  </div>
                 </div>
+              )}
+
+              {current.id === 'mfa' && (
+                isStepDone(step) ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 text-ok">
+                      <CheckCircle size={18} />
+                      <span className="text-sm font-medium text-ok">MFA is active and configured for your account.</span>
+                    </div>
+                    <p className="text-xs text-ink-muted leading-relaxed">
+                      Your session is protected with multi-factor authentication. You can generate new recovery codes or disable MFA from the Settings page.
+                    </p>
+                  </div>
+                ) : (
+                  <MfaWizardStep onDone={() => markStep(current.field, true)} />
+                )
               )}
 
               {isStepDone(step) && !current.interactive && current.id !== 'grafana' && (
@@ -1460,7 +1575,7 @@ export default function SetupWizard() {
               </button>
             ) : step < totalSteps - 1 ? (
               <>
-                {current.interactive && !isStepDone(step) ? (
+                {current.interactive && !isStepDone(step) && current.id !== 'services' && (current.id !== 'privacy_policy' || !privacyAccepted) ? (
                   <button
                     onClick={skipStep}
                     className="px-3 py-1.5 text-xs text-ink-muted hover:text-ink-secondary transition-colors"

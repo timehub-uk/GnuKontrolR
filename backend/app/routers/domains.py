@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Valid RFC-1123 hostname pattern — no path traversal, no shell metacharacters
 _VALID_DOMAIN_RE = _re.compile(
@@ -23,7 +23,7 @@ from app.models.domain import Domain, DomainType, DomainStatus
 from app.models.container_port import ContainerPort
 from app.models.user import User, Role
 from app.auth import get_current_user
-from app.routers.localdns import _localdns_sync
+from app.routers.localdns import _localdns_sync, _localdns_sync_bg
 from app.notify import push as notify_push
 
 log = logging.getLogger("webpanel")
@@ -94,11 +94,9 @@ async def list_domains(db: AsyncSession = Depends(get_db), current: User = Depen
     # Check which site containers are currently running (non-blocking, best-effort)
     running_names: set[str] = set()
     try:
-        import subprocess, json as _json
-        out = subprocess.check_output(
-            ["docker", "ps", "--format", "{{json .Names}}"], timeout=3
-        ).decode()
-        running_names = {line.strip().strip('"') for line in out.splitlines() if line.strip()}
+        from app.docker_client import list_containers as _list_containers
+        containers = await _list_containers(all=False)
+        running_names = {c.get("Names", [""])[0].lstrip("/") for c in containers if c.get("Names")}
     except Exception:
         pass
 
@@ -133,6 +131,7 @@ async def create_domain(body: DomainCreate, db: AsyncSession = Depends(get_db), 
     existing = await db.execute(select(Domain).where(Domain.name == body.name))
     if existing.scalar_one_or_none():
         raise HTTPException(409, "Domain already exists")
+    from datetime import timedelta
     domain = Domain(
         name=body.name,
         owner_id=current.id,
@@ -141,17 +140,23 @@ async def create_domain(body: DomainCreate, db: AsyncSession = Depends(get_db), 
         php_version=body.php_version,
         redirect_to=body.redirect_to,
         acme_email=current.email,   # LE contact = domain owner's email
+        ssl_enabled=True,           # Auto-enable SSL — container labels + Traefik handle cert provisioning
+        ssl_expires=datetime.now(timezone.utc) + timedelta(days=90),  # Traefik LE certs are valid 90 days
     )
     db.add(domain)
     await db.commit()
     await db.refresh(domain)
     await provision_domain_dns(domain)
-    asyncio.create_task(_localdns_sync(db))
+    # Note: do NOT pass `db` to background tasks — the request session will be
+    # closed by the middleware before the task runs, causing SQLAlchemy errors.
+    # Background tasks that need a DB session create their own via get_db().
     # Write per-domain Traefik resolver config using the owner's email
     _write_traefik_resolver(body.name, current.email)
 
-    # Auto-create the site container in the background (non-blocking)
-    asyncio.create_task(_create_container_for_domain(domain.name, domain.php_version or "8.2", db, owner_email=current.email))
+    # Auto-create the site container in the background (non-blocking).
+    # These tasks create their own DB sessions — never pass the request's db.
+    asyncio.create_task(_localdns_sync_bg())
+    asyncio.create_task(_create_container_for_domain(domain.name, domain.php_version or "8.2", owner_email=current.email))
 
     asyncio.create_task(notify_push(
         db,
@@ -519,76 +524,158 @@ def _write_placeholder(domain_name: str, path: str) -> None:
         log.warning("Could not write placeholder index for %s: %s", domain_name, exc)
 
 
-async def _create_container_for_domain(domain_name: str, php_version: str, db, owner_email: str = "") -> None:
-    """Background task: spin up a site container after domain creation."""
+async def _setup_mysql_demo_db(db_name: str, db_user: str, db_pass: str) -> None:
+    """Set up MySQL demo database via Docker API exec."""
+    from app.routers.docker_mgr import _MYSQL_PASSWORD
+    from app.docker_client import exec_run
+    sql = (
+        f"CREATE DATABASE IF NOT EXISTS `{db_name}`; "
+        f"CREATE USER IF NOT EXISTS '{db_user}'@'%' IDENTIFIED BY '{db_pass}'; "
+        f"ALTER USER '{db_user}'@'%' IDENTIFIED BY '{db_pass}'; "
+        f"GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{db_user}'@'%'; "
+        f"FLUSH PRIVILEGES; "
+        f"USE `{db_name}`; "
+        f"CREATE TABLE IF NOT EXISTS demo_table ("
+        f"  id INT AUTO_INCREMENT PRIMARY KEY,"
+        f"  message VARCHAR(255) NOT NULL,"
+        f"  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        f"); "
+        f"INSERT INTO demo_table (message) VALUES ('Hello from GnuKontrolR demo database!');"
+    )
     try:
-        # Import here to avoid circular imports
-        from app.routers.docker_mgr import (
-            container_name, _allocate_port, _run,
-            NETWORK_NAME, PHP_IMAGE_PREFIX, SUPPORTED_PHP, DEFAULT_PHP,
-            _REDIS_URL, _CONTAINER_API_TOKEN, _MYSQL_PASSWORD,
-            _inject_panel_ssh_key, APP_CACHE_HOST_DIR,
+        # H11: Use MYSQL_PWD env var instead of -p flag to avoid password in cmdline
+        await exec_run(
+            "webpanel_mysql",
+            ["mysql", "-uroot", "-e", sql],
+            env={"MYSQL_PWD": _MYSQL_PASSWORD},
         )
-        import secrets as _secrets
-        name    = container_name(domain_name)
-        php_ver = php_version if php_version in SUPPORTED_PHP else DEFAULT_PHP
-        image   = f"{PHP_IMAGE_PREFIX}:{php_ver}"
-        db_safe = domain_name.replace(".", "_").replace("-", "_")
-        db_name = db_safe
-        db_user = db_safe[:16]
-        db_pass = _secrets.token_urlsafe(16)
-        doc_root = f"/var/webpanel/sites/{domain_name}/public_html"
-        _run(["mkdir", "-p", doc_root])
-        _run(["mkdir", "-p", APP_CACHE_HOST_DIR])
-        # Write a branded placeholder page if the public_html is empty
-        index_path = os.path.join(doc_root, "index.html")
-        if not os.path.exists(index_path):
-            _write_placeholder(domain_name, index_path)
-
-        ssh_port = await _allocate_port(db, domain_name, "ssh")
-
-        run_args = [
-            "docker", "run", "-d",
-            "--name", name,
-            "--network", NETWORK_NAME,
-            "--restart", "unless-stopped",
-            "--memory", "1024m",
-            "--cpus", "0.5",
-            "--tmpfs", "/tmp:rw,size=256m",
-            "--tmpfs", "/var/run:rw,size=16m",
-            "-v", f"{doc_root}:/var/www/html",
-            "-v", f"{APP_CACHE_HOST_DIR}:/var/cache/gnukontrolr/apps:ro",
-            "-p", f"127.0.0.1:{ssh_port}:22",
-            "-e", f"DOMAIN={domain_name}",
-            "-e", "DB_HOST=webpanel_mysql",
-            "-e", f"DB_NAME={db_name}",
-            "-e", f"DB_USER={db_user}",
-            "-e", f"DB_PASS={db_pass}",
-            "-e", f"MYSQL_ROOT_PASSWORD={_MYSQL_PASSWORD}",
-            "-e", f"REDIS_URL={_REDIS_URL}",
-            "-e", "SMTP_HOST=webpanel_postfix",
-            "-e", "WEB_SERVER=nginx",
-            "-e", f"CONTAINER_API_TOKEN={_CONTAINER_API_TOKEN}",
-            "-l", "traefik.enable=true",
-            "-l", f"traefik.http.routers.{name}.rule=Host(`{domain_name}`) || Host(`www.{domain_name}`)",
-            "-l", f"traefik.http.routers.{name}.tls=true",
-            "-l", f"traefik.http.routers.{name}.tls.certresolver=le",
-            "-l", f"gnukontrolr.acme_email={owner_email or 'unset'}",
-            image,
-        ]
-        code, out, err = _run(run_args)
-        if code != 0:
-            log.error("Auto-container creation failed for %s: %s", domain_name, err)
-        else:
-            log.info("Auto-created container %s (PHP %s) for domain %s", name, php_ver, domain_name)
-            # Inject panel SSH key so the panel service can SSH into the container
-            ok = await _inject_panel_ssh_key(domain_name)
-            if ok:
-                log.info("Panel SSH key injected into %s", name)
-            else:
-                log.warning("Panel SSH key injection failed for %s (will need manual inject)", name)
     except Exception as exc:
-        log.error("Auto-container creation error for %s: %s", domain_name, exc)
+        log.warning("Could not set up MySQL demo database for %s: %s", db_name, exc)
+
+
+async def _create_container_for_domain(domain_name: str, php_version: str, owner_email: str = "") -> None:
+    """Background task: spin up a site container after domain creation.
+
+    Creates its own DB session (never reuse the request's session in a task).
+    Retries up to 5 times with exponential backoff on SQLite locking errors.
+    """
+    import asyncio
+    await asyncio.sleep(2.0)  # let the request handler's transaction commit fully + queue drain
+    from app.database import AsyncSessionLocal  # local import to avoid circular
+    for _attempt in range(5):
+        async with AsyncSessionLocal() as db:  # fresh session, properly closed on scope exit
+            try:
+                # Import here to avoid circular imports
+                from app.routers.docker_mgr import (
+                    container_name, _allocate_port, _run,
+                    NETWORK_NAME, PHP_IMAGE_PREFIX, SUPPORTED_PHP, DEFAULT_PHP,
+                    _REDIS_URL, _MYSQL_PASSWORD,
+                    _inject_panel_ssh_key, APP_CACHE_HOST_DIR,
+                )
+                from app.docker_client import create_container, start_container
+                from app.auth import get_user_password
+                name    = container_name(domain_name)
+                php_ver = php_version if php_version in SUPPORTED_PHP else DEFAULT_PHP
+                image   = f"{PHP_IMAGE_PREFIX}:{php_ver}"
+                db_safe = domain_name.replace(".", "_").replace("-", "_")
+                db_name = db_safe
+                db_user = db_safe[:16]
+                db_pass = await get_user_password(db)
+
+                # Provision the demo MySQL database & user on the server
+                await _setup_mysql_demo_db(db_name, db_user, db_pass)
+
+                doc_root = f"/var/webpanel/sites/{domain_name}/public_html"
+                _run(["mkdir", "-p", doc_root])
+                _run(["mkdir", "-p", APP_CACHE_HOST_DIR])
+                # Write a branded placeholder page if the public_html is empty
+                index_path = os.path.join(doc_root, "index.html")
+                if not os.path.exists(index_path):
+                    _write_placeholder(domain_name, index_path)
+
+                ssh_port = await _allocate_port(db, domain_name, "ssh")
+
+                # H9: Generate per-domain container API token
+                import secrets as _secrets
+                domain_token = _secrets.token_urlsafe(32)
+                # Store token on the domain record
+                from app.models.domain import Domain as _Domain
+                from sqlalchemy import select as _select
+                _dom_result = await db.execute(_select(_Domain).where(_Domain.name == domain_name))
+                _dom_row = _dom_result.scalar_one_or_none()
+                if _dom_row:
+                    _dom_row.container_api_token = domain_token
+                    await db.commit()
+
+                # Create container via Docker HTTP API
+                labels = {
+                    "traefik.enable": "true",
+                    f"traefik.http.routers.{name}.rule": f"Host(`{domain_name}`) || Host(`www.{domain_name}`)",
+                    f"traefik.http.routers.{name}.tls": "true",
+                    f"traefik.http.routers.{name}.tls.certresolver": "le",
+                    f"gnukontrolr.acme_email": owner_email or "unset",
+                }
+                env = [
+                    f"DOMAIN={domain_name}",
+                    "DB_HOST=webpanel_mysql",
+                    f"DB_NAME={db_name}",
+                    f"DB_USER={db_user}",
+                    f"DB_PASS={db_pass}",
+                    f"MYSQL_ROOT_PASSWORD={_MYSQL_PASSWORD}",
+                    f"REDIS_URL={_REDIS_URL}",
+                    "SMTP_HOST=webpanel_postfix",
+                    "WEB_SERVER=nginx",
+                    f"CONTAINER_API_TOKEN={domain_token}",
+                ]
+                volumes = [
+                    f"{doc_root}:/var/www/html",
+                    f"{APP_CACHE_HOST_DIR}:/var/cache/gnukontrolr/apps:rw",
+                ]
+                port_bindings = {
+                    "22/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(ssh_port)}],
+                }
+                tmpfs = {
+                    "/tmp": "rw,size=256m",
+                    "/var/run": "rw,size=16m",
+                }
+
+                result = await create_container(
+                    name=name,
+                    image=image,
+                    network=NETWORK_NAME,
+                    env=env,
+                    volumes=volumes,
+                    labels=labels,
+                    port_bindings=port_bindings,
+                    exposed_ports={"22/tcp": {}, "9000/tcp": {}},
+                    mem_limit="1024m",
+                    cpus=0.5,
+                    tmpfs=tmpfs,
+                    host_config={
+                        "RestartPolicy": {"Name": "unless-stopped"},
+                    },
+                )
+                await start_container(name)
+                log.info("Auto-created container %s (PHP %s) for domain %s", name, php_ver, domain_name)
+
+                # Inject panel SSH key so the panel service can SSH into the container
+                ok = await _inject_panel_ssh_key(domain_name, token=domain_token)
+                if ok:
+                    log.info("Panel SSH key injected into %s", name)
+                else:
+                    log.warning("Panel SSH key injection failed for %s (will need manual inject)", name)
+            except Exception as exc:
+                err_str = str(exc)
+                if "database is locked" in err_str and _attempt < 4:
+                    backoff = 1.5 ** (_attempt + 2)  # 3.4s, 5.1s, 7.6s, 11.4s
+                    log.warning("DB locked for %s (attempt %d/%d) — retrying in %.1fs...",
+                                domain_name, _attempt + 1, 5, backoff)
+                    await asyncio.sleep(backoff)
+                    break  # restart the outer for loop with a fresh session
+                log.error("Auto-container creation error for %s: %s", domain_name, exc)
+                return
+            else:
+                return  # success — exit the retry loop
 
 
 @router.patch("/{domain_id}")
@@ -602,7 +689,7 @@ async def update_domain(domain_id: int, body: DomainUpdate, db: AsyncSession = D
     old_php = domain.php_version
     for field, val in body.model_dump(exclude_none=True).items():
         setattr(domain, field, val)
-    domain.updated_at = datetime.utcnow()
+    domain.updated_at = datetime.now(timezone.utc)
     await db.commit()
 
     # If PHP version changed, recreate the container with the new image
@@ -610,17 +697,25 @@ async def update_domain(domain_id: int, body: DomainUpdate, db: AsyncSession = D
     if body.php_version and new_php != old_php:
         asyncio.create_task(_recreate_container_for_domain(domain.name, new_php, db))
 
-    asyncio.create_task(_localdns_sync(db))
+    asyncio.create_task(_localdns_sync_bg())
     return {"ok": True}
 
 
 async def _recreate_container_for_domain(domain_name: str, php_version: str, db) -> None:
     """Background task: stop/remove existing container and start a new one with updated PHP version."""
     try:
-        from app.routers.docker_mgr import container_name, _run, _release_ports
+        from app.routers.docker_mgr import container_name, _release_ports
+        from app.docker_client import remove_container, stop_container
         name = container_name(domain_name)
         # Stop and remove old container (preserves volume-mounted /var/www/html)
-        _run(["docker", "rm", "-f", name])
+        try:
+            await stop_container(name)
+        except Exception:
+            pass
+        try:
+            await remove_container(name, force=True)
+        except Exception:
+            pass
         await _release_ports(db, domain_name)
         await _create_container_for_domain(domain_name, php_version, db)
         log.info("Recreated container %s with PHP %s", name, php_version)
@@ -706,7 +801,9 @@ def _update_env_var(key: str, value: str) -> None:
             content = _re.sub(rf"^{key}=.*$", f"{key}={value}", content, flags=_re.MULTILINE)
         else:
             content += f"\n{key}={value}\n"
-        with open(env_path, "w") as f:
+        # L5: Restrict .env file to owner-only read/write (contains secrets)
+        fd = os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.write(content)
         log.info("Updated .env: %s=%s", key, value)
     except Exception as exc:
@@ -736,4 +833,4 @@ async def delete_domain(domain_id: int, db: AsyncSession = Depends(get_db), curr
     await db.delete(domain)
     await db.commit()
     await deprovision_domain_dns(domain_name)
-    asyncio.create_task(_localdns_sync(db))
+    asyncio.create_task(_localdns_sync_bg())

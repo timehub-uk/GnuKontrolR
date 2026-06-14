@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import smtplib
-from datetime import datetime
+from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -25,6 +25,8 @@ log = logging.getLogger("webpanel.notify")
 
 SMTP_HOST    = os.getenv("SMTP_HOST", "postfix")
 SMTP_PORT    = int(os.getenv("SMTP_PORT", "25"))
+SMTP_USER    = os.getenv("SMTP_USER", "")
+SMTP_PASS    = os.getenv("SMTP_PASS", "")
 PANEL_DOMAIN = os.getenv("PANEL_DOMAIN", "localhost")
 
 
@@ -48,6 +50,19 @@ def _send_email(to: str, subject: str, html: str) -> None:
     msg.attach(MIMEText(html, "html"))
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as s:
+            # Upgrade to STARTTLS if available
+            try:
+                s.starttls()
+            except smtplib.SMTPNotSupportedError:
+                pass  # Server may not support STARTTLS — proceed in plaintext
+
+            # Authenticate if SMTP credentials are configured
+            if SMTP_USER and SMTP_PASS:
+                try:
+                    s.login(SMTP_USER, SMTP_PASS)
+                except smtplib.SMTPAuthenticationError:
+                    log.warning("SMTP authentication failed — sending without auth")
+
             s.sendmail(from_addr, [to], msg.as_string())
         log.info("Notification email sent to %s: %s", to, subject)
     except Exception as exc:
@@ -89,7 +104,7 @@ def _render_email(title: str, message: str, details: dict, ts: str) -> str:
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 async def push(
-    db: AsyncSession,
+    db: AsyncSession = None,  # kept for backward compat; always creates own session
     *,
     type: str,
     title: str,
@@ -98,26 +113,29 @@ async def push(
 ) -> None:
     """
     Save a notification to the DB and send an email to the superadmin.
+    Always creates its own DB session — safe to call from background tasks.
     Non-blocking — email is dispatched in a thread pool.
     """
+    from app.database import AsyncSessionLocal as _AsyncSessionLocal
     from app.models.notification import Notification
 
     details = details or {}
-    ts      = datetime.utcnow()
+    ts      = datetime.now(timezone.utc)
 
-    notif = Notification(
-        type       = type,
-        title      = title,
-        message    = message,
-        details    = json.dumps(details),
-        is_read    = False,
-        created_at = ts,
-    )
-    db.add(notif)
-    await db.commit()
+    async with _AsyncSessionLocal() as _db:
+        notif = Notification(
+            type       = type,
+            title      = title,
+            message    = message,
+            details    = json.dumps(details),
+            is_read    = False,
+            created_at = ts,
+        )
+        _db.add(notif)
+        await _db.commit()
+        admin_email = await _get_superadmin_email(_db)
 
     # Fire email in background — do not await so we don't block the request
-    admin_email = await _get_superadmin_email(db)
     if admin_email:
         html    = _render_email(title, message, details, ts.strftime("%Y-%m-%d %H:%M UTC"))
         subject = f"[GnuKontrolR] {title}"

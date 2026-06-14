@@ -16,6 +16,7 @@ from app.models.site_backup import SiteBackup
 from app.models.setup import SetupState
 from app.models.hosting_plan import HostingPlan
 from app.models.secondary_service import SecondaryService
+from app.models.secondary_service_blob import SecondaryServiceBlob
 
 # Compliance models
 from app.models.mfa_device import MFADevice

@@ -42,18 +42,21 @@ export function useCachedFetch(url, cacheKey, { ttl = 60_000, transform = null }
   const isStale = !cached || (Date.now() - cached.fetchedAt) > ttl;
 
   const [data,    setData]    = useState(cached?.data ?? null);
-  const [loading, setLoading] = useState(isStale);
+  const [loading, setLoading] = useState(!cached);
   const [error,   setError]   = useState(null);
   const mounted = useRef(true);
 
   const fetch_ = useCallback(async (force = false) => {
     const c = getCached(key);
+    const hasCache = !!c;
     if (!force && c && (Date.now() - c.fetchedAt) <= ttl) {
       setData(c.data);
       setLoading(false);
       return;
     }
-    setLoading(true);
+    if (!hasCache) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const res  = await api.get(url);

@@ -7,7 +7,7 @@ import secrets
 import shlex
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -19,6 +19,7 @@ from app.models.user import User
 from app.models.fail2ban import Fail2banJail
 from app.auth import get_current_user, require_superadmin, hash_password
 from app.secrets import vault_summary, get_manifest, vault_is_mounted
+from app.docker_client import exec_run, stop_container, remove_container
 
 log = logging.getLogger("webpanel")
 
@@ -328,6 +329,75 @@ def _write_env(env: dict[str, str]) -> None:
         log.warning("Cannot write .env at %s (%s) — key updated in memory only", _ENV_PATH, exc)
 
 
+async def _apply_password_rotation_task(new_pw: str) -> None:
+    """Connect to MySQL and update root/webpanel and all domain databases' passwords."""
+    from app.routers.docker_mgr import _MYSQL_PASSWORD
+    old_root_pw = os.environ.get("MYSQL_ROOT_PASSWORD", _MYSQL_PASSWORD)
+
+    # Try different passwords to see which one works
+    pws = [old_root_pw, new_pw]  # L7: Removed hardcoded fallback passwords
+    working_pw = None
+    for pw in pws:
+        if not pw:
+            continue
+        try:
+            # H11: Use MYSQL_PWD env var instead of -p flag to avoid password in cmdline
+            rc, out = await exec_run(
+                "webpanel_mysql",
+                ["mysql", "-uroot", "-e", "SELECT 1;"],
+                env={"MYSQL_PWD": pw},
+            )
+            if rc == 0:
+                working_pw = pw
+                break
+        except Exception:
+            continue
+
+    if working_pw:
+        # Query for non-default MySQL users
+        try:
+            rc, out = await exec_run(
+                "webpanel_mysql",
+                ["mysql", "-uroot", "-sN", "-e",
+                 "SELECT user FROM mysql.user WHERE user NOT IN ('root', 'mysql.sys', 'mysql.session', 'mysql.infoschema', 'webpanel', 'mariadb.sys')"],
+                env={"MYSQL_PWD": working_pw},
+            )
+            users = [line.strip() for line in out.splitlines() if line.strip()] if rc == 0 else []
+        except Exception:
+            users = []
+
+        # Build ALTER USER statements
+        sql_parts = [
+            f"ALTER USER 'root'@'%' IDENTIFIED BY '{new_pw}';",
+            f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{new_pw}';",
+            f"ALTER USER 'webpanel'@'%' IDENTIFIED BY '{new_pw}';",
+        ]
+        for u in users:
+            sql_parts.append(f"ALTER USER '{u}'@'%' IDENTIFIED BY '{new_pw}';")
+        sql_parts.append("FLUSH PRIVILEGES;")
+        combined_sql = " ".join(sql_parts)
+
+        # Execute via mysql -e with MYSQL_PWD env (H11: no password in cmdline)
+        try:
+            await exec_run(
+                "webpanel_mysql",
+                ["mysql", "-uroot", "-e", combined_sql],
+                env={"MYSQL_PWD": working_pw},
+            )
+        except Exception as e:
+            log.warning("MySQL password rotation failed: %s", e)
+
+    # 2. Update Postgres
+    try:
+        await exec_run(
+            "webpanel_postgres",
+            ["psql", "-U", "webpanel", "-d", "webpanel", "-c",
+             f"ALTER USER webpanel WITH PASSWORD '{new_pw}';"],
+        )
+    except Exception as e:
+        log.warning("Postgres password rotation failed: %s", e)
+
+
 @router.post("/rotate-secrets")
 async def rotate_secrets(
     body: dict,
@@ -344,16 +414,52 @@ async def rotate_secrets(
 
     result = {}
     if new_password:
-        current.hashed_password = hash_password(new_password)
+        new_hash = hash_password(new_password)
+        # Update only the current user's password
+        from app.models.user import Role
+        current.hashed_password = new_hash
+        current.password_changed_at = datetime.now(timezone.utc)
+        db.add(current)
         await db.commit()
+
+        # Write service passwords to .env (M13: each service gets its own random password)
+        env["MYSQL_ROOT_PASSWORD"] = secrets.token_urlsafe(32)
+        env["MYSQL_PASSWORD"] = secrets.token_urlsafe(32)
+        env["POSTGRES_PASSWORD"] = secrets.token_urlsafe(32)
+        env["GRAFANA_PASSWORD"] = secrets.token_urlsafe(32)
+        _write_env(env)
+
+        # Run database ALTERs in background
+        asyncio.create_task(_apply_password_rotation_task(new_password))
+
+        # Recreate all site containers
+        from app.models.domain import Domain
+        from app.routers.domains import _create_container_for_domain
+
+        result_domains = await db.execute(select(Domain))
+        domains = result_domains.scalars().all()
+
+        for domain in domains:
+            name = f"site_{domain.name.replace('.', '_').replace('-', '_')}"
+            try:
+                await stop_container(name)
+            except Exception:
+                pass
+            try:
+                await remove_container(name, force=True)
+            except Exception:
+                pass
+
+            asyncio.create_task(_create_container_for_domain(domain.name, domain.php_version or "8.2", db, owner_email=domain.acme_email))
+
         result["password_updated"] = True
 
     # Reload env so the running process picks up the new key
     os.environ["SECRET_KEY"] = new_key
 
+    # M9: Do NOT return new_secret_key in response — prevent log exposure
     return {
         "secret_key_updated": True,
-        "new_secret_key": new_key,
         "password_updated": bool(new_password),
         "restart_required": True,
     }
@@ -388,6 +494,14 @@ _FILTERS: dict[str, str] = {
         'ignoreregex =\n'
     ),
 }
+
+# ── Allowed host path prefixes for _host_write (C9: prevent arbitrary host writes) ──
+_ALLOWED_HOST_PATHS = (
+    "/etc/fail2ban/",
+    "/usr/local/bin/",
+    "/etc/systemd/",
+)
+
 
 _JAILS_CONF: list[dict] = [
     {"name": "sshd", "port": "ssh", "filter_name": "sshd", "logpath": "/var/log/auth.log",
@@ -468,7 +582,20 @@ def _host_write(path: str, content: str) -> None:
     """Write a file on the host via a privileged Docker container (base64-safe).
 
     The container mounts the host root at /host, so we prefix all paths.
+    Path is validated against _ALLOWED_HOST_PATHS to prevent arbitrary host writes.
     """
+    # C9: validate path is within allowed prefixes
+    allowed = any(path.startswith(prefix) for prefix in _ALLOWED_HOST_PATHS)
+    if not allowed:
+        log.error("Blocked _host_write to unauthorized path: %s (must be under %s)",
+                   path, ", ".join(_ALLOWED_HOST_PATHS))
+        return
+    # Block shell metacharacters in path
+    for ch in ("'", ";", "`", "$", "|", "&", "(", ")", "\n"):
+        if ch in path:
+            log.error("Blocked _host_write with shell metacharacter in path: %s", path)
+            return
+
     encoded = base64.b64encode(content.encode()).decode()
     hp = f"/host{path}"
     script = f"mkdir -p $(dirname '{hp}') && echo '{encoded}' | base64 -d > '{hp}' && chmod 644 '{hp}'"
@@ -485,6 +612,12 @@ def _host_write(path: str, content: str) -> None:
 
 def _host_run(cmd: list[str]) -> None:
     """Run a command on the host via nsenter in a privileged Docker container."""
+    # Validate each argument for shell metacharacters
+    for arg in cmd:
+        for ch in ("'", ";", "`", "$", "|", "&", "(", ")", "\n"):
+            if ch in arg:
+                log.error("Blocked _host_run with shell metacharacter in command arg: %s", arg)
+                return
     joined = " ".join(shlex.quote(c) for c in cmd)
     try:
         subprocess.run(

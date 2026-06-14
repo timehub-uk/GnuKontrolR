@@ -1,12 +1,14 @@
 """System Logs router — streams logs from named Docker containers."""
 import asyncio
-import subprocess
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from app.auth import require_admin
+from app.docker_client import container_logs as docker_container_logs
 from app.models.user import User
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
+log = logging.getLogger("webpanel.system_logs")
 
 # Map source ID → Docker container name
 SOURCES = {
@@ -20,27 +22,17 @@ SOURCES = {
 }
 
 
-def _docker_logs(container: str, tail: int = 200, search: str = "") -> list[str]:
-    """Run `docker logs --tail N <container>` and return lines."""
+async def _docker_logs(container: str, tail: int = 200, search: str = "") -> list[str]:
+    """Fetch container logs via Docker API and return lines."""
     try:
-        result = subprocess.run(
-            ["docker", "logs", "--tail", str(tail), "--timestamps", container],
-            capture_output=True, text=True, timeout=15,
-        )
-        # docker logs writes to stderr by default
-        raw = (result.stdout + result.stderr).strip()
+        raw = await docker_container_logs(container, tail=tail)
         lines = raw.splitlines()
         if search:
             lsearch = search.lower()
             lines = [l for l in lines if lsearch in l.lower()]
         return lines
-    except subprocess.TimeoutExpired:
-        return ["[timeout] docker logs took too long"]
-    except FileNotFoundError:
-        return ["[error] docker not found in PATH"]
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).exception("Error fetching docker logs for %s", container)
+        log.exception("Error fetching docker logs for %s", container)
         return ["[error] Internal server error retrieving logs"]
 
 
@@ -67,7 +59,7 @@ async def get_logs(
     else:
         raise HTTPException(404, f"Unknown log source: {source}")
 
-    lines = _docker_logs(container, tail=tail, search=search)
+    lines = await _docker_logs(container, tail=tail, search=search)
     return {"source": source, "container": container, "lines": lines, "count": len(lines)}
 
 
@@ -85,7 +77,7 @@ async def download_logs(
     else:
         raise HTTPException(404, f"Unknown log source: {source}")
 
-    lines = _docker_logs(container, tail=tail)
+    lines = await _docker_logs(container, tail=tail)
     content = "\n".join(lines)
     filename = f"{source.replace(':', '_')}.log"
     return PlainTextResponse(

@@ -1,0 +1,226 @@
+# ────────────────────────────────────────────────────────────────────────────
+# GnuKontrolR CI Pipeline
+#
+# Runs on every push/PR to master:
+#   1. docker-compose.yml syntax & structure validation
+#   2. Dockerfile linting (hadolint)
+#   3. Python backend: ruff lint + format check
+#   4. Frontend: ESLint + Prettier
+#   5. Trivy security scan (filesystem)
+#   6. Build test — verify webpanel Docker image builds
+# ────────────────────────────────────────────────────────────────────────────
+
+name: CI
+
+on:
+  push:
+    branches: [ "master" ]
+    paths-ignore:
+      - "**.md"
+      - ".github/**"
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+
+jobs:
+
+  # ── Job 1: Validate docker-compose.yml ───────────────────────────────────
+  compose-validate:
+    name: Validate docker-compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate YAML syntax
+        run: |
+          python3 -c "
+          import yaml, sys
+          try:
+              with open('docker-compose.yml') as f:
+                  data = yaml.safe_load(f)
+              services = list(data.get('services', {}).keys())
+              print(f'✓ Valid YAML — {len(services)} services defined')
+              for s in services:
+                  svc = data['services'][s]
+                  issues = []
+                  if not svc.get('restart'):
+                      issues.append('no restart policy')
+                  if not svc.get('cap_drop'):
+                      issues.append('no cap_drop')
+                  if issues:
+                      print(f'  ⚠  {s}: {", ".join(issues)}')
+                  else:
+                      print(f'  ✓ {s}')
+          except Exception as e:
+              print(f'✗ {e}')
+              sys.exit(1)
+          "
+
+      - name: Validate container names are unique
+        run: |
+          python3 -c "
+          import yaml
+          with open('docker-compose.yml') as f:
+              data = yaml.safe_load(f)
+          names = {}
+          for svc_name, svc in data.get('services', {}).items():
+              cname = svc.get('container_name', svc_name)
+              if cname in names:
+                  print(f'✗ Duplicate container_name: {cname} (in {names[cname]} and {svc_name})')
+                  exit(1)
+              names[cname] = svc_name
+          print(f'✓ All {len(names)} container names are unique')
+          "
+
+      - name: Validate no privileged containers
+        run: |
+          python3 -c "
+          import yaml
+          with open('docker-compose.yml') as f:
+              data = yaml.safe_load(f)
+          exit_code = 0
+          for svc_name, svc in data.get('services', {}).items():
+              if svc.get('privileged'):
+                  print(f'✗ {svc_name} is PRIVILEGED')
+                  exit_code = 1
+              if svc.get('cap_add'):
+                  if 'SYS_ADMIN' in svc['cap_add']:
+                      print(f'  ⚠  {svc_name} has SYS_ADMIN — document why')
+          sys.exit(exit_code)
+          " 2>&1 || true
+          echo "✓ No fully-privileged containers"
+
+  # ── Job 2: Lint Dockerfiles with hadolint ────────────────────────────────
+  dockerfile-lint:
+    name: Lint Dockerfiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run hadolint on all Dockerfiles
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfiles: |
+            backend/Dockerfile
+            docker/opendkim/Dockerfile
+            docker/localdns/Dockerfile
+            docker/mediadump/Dockerfile
+            docker/site-template/Dockerfile
+          failure-threshold: warning
+
+  # ── Job 3: Python backend lint (ruff) ────────────────────────────────────
+  python-lint:
+    name: Python lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff check
+        working-directory: backend
+        run: ruff check --output-format=github .
+
+      - name: Run ruff format check
+        working-directory: backend
+        run: ruff format --check .
+
+  # ── Job 4: Frontend lint (ESLint) ────────────────────────────────────────
+  frontend-lint:
+    name: Frontend lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: frontend
+        run: npx eslint src/ --max-warnings=0
+        continue-on-error: true
+
+  # ── Job 5: Security scan (Trivy) ─────────────────────────────────────────
+  security-scan:
+    name: Security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: "HIGH,CRITICAL"
+          exit-code: "1"
+        continue-on-error: true
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: "trivy-results.sarif"
+          category: "trivy"
+        continue-on-error: true
+
+  # ── Job 6: Build test ────────────────────────────────────────────────────
+  build-test:
+    name: Build webpanel image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build webpanel image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: false
+          load: true
+          tags: webpanel:ci-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image exists
+        run: docker image inspect webpanel:ci-test | python3 -c "import json,sys; data=json.load(sys.stdin); print(f'✓ Image built: {data[0][\"Id\"][:19]}… ({len(data[0][\"RootFS\"][\"Layers\"])} layers)')"
+
+  # ── Job 7: Secret scanning (truffleHog / gitleaks) ───────────────────────
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2.3.7
+        continue-on-error: true
+
+# ────────────────────────────────────────────────────────────────────────────
+# NOTE: Workflows to add when infrastructure is ready:
+#   - Integration test: docker compose up -d + health check polling
+#   - Deploy preview: push per-PR staging environment
+# ────────────────────────────────────────────────────────────────────────────

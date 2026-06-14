@@ -14,8 +14,9 @@ class SiteBackup(Base):
     filename    = Column(String(512), nullable=False)
     backup_type = Column(String(32), default="website")   # website | files | db | full
     size        = Column(BigInteger, nullable=True)
-    unique_id   = Column(String(36), unique=True, nullable=False, default=lambda: str(uuid.uuid4()))
-    csc_token   = Column(String(64), nullable=False, default=lambda: secrets.token_hex(32))
-    created_at  = Column(DateTime, default=datetime.utcnow)
-    created_by  = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    deleted     = Column(Integer, default=0)   # soft-delete flag
+    unique_id       = Column(String(36), unique=True, nullable=False, default=lambda: str(uuid.uuid4()))
+    csc_token       = Column(String(64), nullable=False, default=lambda: secrets.token_hex(32))
+    checksum_sha256 = Column(String(64), nullable=True)   # H13: SHA-256 hex digest for integrity verification
+    created_at      = Column(DateTime, default=datetime.utcnow)
+    created_by      = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    deleted         = Column(Integer, default=0)   # soft-delete flag

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import api from '../utils/api';
+import api, { getAccessToken } from '../utils/api';
 import {
   Activity, RefreshCw, Server, Database, Wifi, Cpu,
   MemoryStick, HardDrive, Container, CheckCircle2,
@@ -141,7 +141,7 @@ export default function DiagnosticPage() {
     const host  = window.location.hostname;
     const port  = import.meta.env.VITE_API_PORT || '8000';
     // Append auth token — ws/stats requires JWT since it was secured
-    const token = localStorage.getItem('access_token');
+    const token = getAccessToken();
     const url   = `${proto}://${host}:${port}/api/server/ws/stats${token ? `?token=${encodeURIComponent(token)}` : ''}`;
 
     let ws;

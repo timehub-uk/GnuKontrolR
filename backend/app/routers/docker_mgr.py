@@ -21,6 +21,13 @@ from app.dns_helper import deprovision_domain_dns, provision_domain_dns
 from app.models.container_port import ContainerPort
 from app.models.domain import Domain
 from app.models.user import User, Role
+from app.docker_client import (
+    list_images, list_containers as dc_list_containers,
+    inspect_container, create_container, start_container,
+    stop_container, restart_container, pause_container, unpause_container,
+    kill_container, remove_container, container_logs as dc_container_logs,
+    container_stats as dc_container_stats, all_containers_stats,
+)
 
 # Redis URL as passed to customer containers — reads from the same env var
 # the panel itself uses, so they always share the correct credentials.
@@ -52,17 +59,36 @@ def _ensure_panel_ssh_key() -> str:
         return fh.read().strip()
 
 
-async def _inject_panel_ssh_key(domain: str) -> bool:
-    """Push the panel's public key into the domain container. Returns True on success."""
+async def _inject_panel_ssh_key(domain: str, token: str | None = None) -> bool:
+    """Push the panel's public key into the domain container. Returns True on success.
+
+    Args:
+        domain: the domain name for the target container.
+        token:  the per-domain container API token (from the domain record).
+                If None, looked up from the database.
+    """
     try:
         pub_key = _ensure_panel_ssh_key()
     except Exception:
         return False
+
+    # Resolve token from DB if not provided
+    if not token:
+        from app.database import AsyncSessionLocal as _AsyncSessionLocal
+        async with _AsyncSessionLocal() as _db:
+            _result = await _db.execute(select(Domain).where(Domain.name == domain))
+            _dom = _result.scalar_one_or_none()
+            if _dom:
+                token = _dom.container_api_token or ""
+
     url = _container_api_url_direct(domain, "/admin/ssh-key")
-    headers = {"Authorization": f"Bearer {_CONTAINER_API_TOKEN}"} if _CONTAINER_API_TOKEN else {}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    # NOTE: Do NOT use panel_client() here — it HMAC-signs requests with the
+    # global CONTAINER_API_TOKEN env var, while the container verifies against
+    # its per-domain token. Use a plain AsyncClient with the per-domain token.
     for attempt in range(6):  # container may still be initialising
         try:
-            async with panel_client(timeout=10, verify=False) as client:
+            async with httpx.AsyncClient(timeout=10, verify=False) as client:
                 r = await client.post(url, json={"public_key": pub_key}, headers=headers)
                 if r.status_code == 200:
                     return True
@@ -98,6 +124,7 @@ PORT_RANGES = {
 
 
 def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
+    """Run a host command (mkdir, cp, etc.) with arg validation."""
     for arg in cmd:
         if not re.match(r"^[a-zA-Z0-9_./\-:={}\[\]\" %*]+$", arg):
             raise ValueError(f"Dangerous argument in command: {arg}")
@@ -247,8 +274,15 @@ _PHP_UPDATE_SCRIPT = os.path.join(
 @router.get("/php-versions")
 async def list_php_versions(_=Depends(require_admin)):
     """Return locally built PHP versions and the current SUPPORTED_PHP set."""
-    code, out, _ = _run(["docker", "images", "--format", "{{.Tag}}", "webpanel/php-site"])
-    local = sorted([t for t in out.splitlines() if t and t[0].isdigit()])
+    try:
+        images = await list_images("webpanel/php-site")
+        local = sorted(set(
+            tag for img in images
+            for tag in img.get("RepoTags", [])
+            if ":" in tag and tag.split(":")[1][0].isdigit()
+        ))
+    except Exception:
+        local = []
     return {"built": local, "supported": sorted(SUPPORTED_PHP)}
 
 
@@ -307,14 +341,10 @@ async def build_php_version(version: str, _=Depends(require_admin)):
 
 @router.get("/containers")
 async def list_containers(_=Depends(require_admin)):
-    code, out, err = _run([
-        "docker", "ps", "-a",
-        "--filter", f"network={NETWORK_NAME}",
-        "--format", "{{json .}}",
-    ])
-    if code != 0:
-        raise HTTPException(500, f"Docker error: {err}")
-    containers = [json.loads(line) for line in out.splitlines() if line]
+    try:
+        containers = await dc_list_containers(all=True, filters={"network": [NETWORK_NAME]})
+    except Exception as e:
+        raise HTTPException(500, f"Docker error: {e}")
     return containers
 
 
@@ -327,11 +357,15 @@ async def get_container(domain: str, db=Depends(get_db), current: User = Depends
         if not result.scalar_one_or_none():
             raise HTTPException(403, "Access denied")
     name = container_name(domain)
-    code, out, err = _run(["docker", "inspect", name])
-    if code != 0:
-        raise HTTPException(404, f"Container not found: {name}")
+    try:
+        info = await inspect_container(name)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(404, f"Container not found: {name}")
+        raise HTTPException(500, f"Docker error: {e}")
+    except Exception as e:
+        raise HTTPException(500, f"Docker error: {e}")
     ports = await _get_ports(db, domain)
-    info  = json.loads(out)[0] if out else {}
     return {**info, "_port_assignments": ports}
 
 
@@ -357,6 +391,7 @@ async def create_domain_container(
     Spin up a fresh isolated Docker container for a domain.
     Each service gets its own unique, persisted host port.
     Container API (port 9000) stays internal — never mapped to host.
+    Uses the Docker HTTP API via docker-api-proxy (no docker.sock).
     """
     name     = container_name(domain)
     doc_root = f"/var/webpanel/sites/{domain}/public_html"
@@ -373,8 +408,9 @@ async def create_domain_container(
         php_ver = DEFAULT_PHP
     image = f"{PHP_IMAGE_PREFIX}:{php_ver}"
 
-    # Create host directory for the site
+    # Create host directories
     _run(["mkdir", "-p", doc_root])
+    _run(["mkdir", "-p", APP_CACHE_HOST_DIR])
 
     # Allocate unique host ports for all active services
     try:
@@ -383,54 +419,83 @@ async def create_domain_container(
     except RuntimeError as e:
         raise HTTPException(503, str(e))
 
-    # Ensure host cache dir exists (containers mount it read-only)
-    _run(["mkdir", "-p", APP_CACHE_HOST_DIR])
-
-    # Build docker run arguments
-    run_args = [
-        "docker", "run", "-d",
-        "--name", name,
-        "--network", NETWORK_NAME,
-        "--restart", "unless-stopped",
-        "--memory", f"{body.memory_mb}m",
-        "--cpus", str(body.cpus),
-        "--tmpfs", "/tmp:rw,size=256m",
-        "--tmpfs", "/var/run:rw,size=16m",
-        "-v", f"{doc_root}:/var/www/html",
-        # Shared read-only marketplace app cache — avoids re-downloading on every install
-        "-v", f"{APP_CACHE_HOST_DIR}:/var/cache/gnukontrolr/apps:ro",
-        # SSH — unique per container, loopback-only (Traefik not involved)
-        "-p", f"127.0.0.1:{ssh_port}:22",
-    ]
-
-    # Node.js direct access (optional, loopback-only)
+    # Build containers-stats port bindings
+    port_bindings = {
+        "22/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(ssh_port)}],
+    }
+    exposed_ports = {
+        "22/tcp": {},
+        "9000/tcp": {},  # container API — internal only
+    }
     if node_port:
-        run_args += ["-p", f"127.0.0.1:{node_port}:3000"]
+        port_bindings["3000/tcp"] = [{"HostIp": "127.0.0.1", "HostPort": str(node_port)}]
+        exposed_ports["3000/tcp"] = {}
 
-    run_args += [
-        # Environment
-        "-e", f"DOMAIN={domain}",
-        "-e", f"DB_HOST=webpanel_mysql",
-        "-e", f"DB_NAME={db_name}",
-        "-e", f"DB_USER={db_user}",
-        "-e", f"DB_PASS={db_pass}",
-        "-e", f"MYSQL_ROOT_PASSWORD={_MYSQL_PASSWORD}",
-        "-e", f"REDIS_URL={_REDIS_URL}",
-        "-e", f"SMTP_HOST=webpanel_postfix",
-        "-e", f"WEB_SERVER={body.web_server}",
-        "-e", f"CONTAINER_API_TOKEN={_CONTAINER_API_TOKEN}",
-        # Traefik labels for auto-SSL routing (HTTP/HTTPS — no unique port needed)
-        "-l", "traefik.enable=true",
-        "-l", f"traefik.http.routers.{name}.rule=Host(`{domain}`)",
-        "-l", f"traefik.http.routers.{name}.tls=true",
-        "-l", f"traefik.http.routers.{name}.tls.certresolver=le",
-        image,
+    # H9: Generate per-domain container API token and store on the domain record
+    import secrets as _secrets
+    domain_token = _secrets.token_urlsafe(32)
+    _dom_result = await db.execute(select(Domain).where(Domain.name == domain))
+    _dom_row = _dom_result.scalar_one_or_none()
+    if _dom_row:
+        _dom_row.container_api_token = domain_token
+        await db.commit()
+
+    # Environment variables
+    env = [
+        f"DOMAIN={domain}",
+        f"DB_HOST=webpanel_mysql",
+        f"DB_NAME={db_name}",
+        f"DB_USER={db_user}",
+        f"DB_PASS={db_pass}",
+        f"MYSQL_ROOT_PASSWORD={_MYSQL_PASSWORD}",
+        f"REDIS_URL={_REDIS_URL}",
+        f"SMTP_HOST=webpanel_postfix",
+        f"WEB_SERVER={body.web_server}",
+        f"CONTAINER_API_TOKEN={domain_token}",
     ]
 
-    code, out, err = _run(run_args)
-    if code != 0:
+    # Labels for Traefik auto-routing
+    labels = {
+        "traefik.enable": "true",
+        f"traefik.http.routers.{name}.rule": f"Host(`{domain}`)",
+        f"traefik.http.routers.{name}.tls": "true",
+        f"traefik.http.routers.{name}.tls.certresolver": "le",
+    }
+
+    # Volumes
+    volumes = [
+        f"{doc_root}:/var/www/html",
+        f"{APP_CACHE_HOST_DIR}:/var/cache/gnukontrolr/apps:rw",
+    ]
+
+    # Tmpfs mounts
+    tmpfs = {
+        "/tmp": "rw,size=256m",
+        "/var/run": "rw,size=16m",
+    }
+
+    # Create the container via Docker HTTP API
+    try:
+        result = await create_container(
+            name=name,
+            image=image,
+            network=NETWORK_NAME,
+            env=env,
+            volumes=volumes,
+            labels=labels,
+            port_bindings=port_bindings,
+            exposed_ports=exposed_ports,
+            mem_limit=f"{body.memory_mb}m",
+            cpus=body.cpus,
+            tmpfs=tmpfs,
+            host_config={
+                "RestartPolicy": {"Name": "unless-stopped"},
+            },
+        )
+        await start_container(name)
+    except Exception as e:
         await _release_ports(db, domain)
-        raise HTTPException(500, f"Failed to create container: {err}")
+        raise HTTPException(500, f"Failed to create container: {e}")
 
     # Provision DNS: create zone + A records in PowerDNS.
     domain_row = await db.scalar(select(Domain).where(Domain.name == domain))
@@ -438,7 +503,7 @@ async def create_domain_container(
         await provision_domain_dns(domain_row)
 
     # Inject panel SSH key in background (container needs a few seconds to start up)
-    asyncio.create_task(_inject_panel_ssh_key(domain))
+    asyncio.create_task(_inject_panel_ssh_key(domain, token=domain_token))
 
     ports = await _get_ports(db, domain)
     return {
@@ -563,20 +628,25 @@ async def container_action(domain: str, body: ContainerAction, _=Depends(require
         raise HTTPException(400, "Invalid domain name")
     name = resolve_container(domain)
     action_map = {
-        "start": "start",
-        "stop": "stop",
-        "restart": "restart",
-        "pause": "pause",
-        "unpause": "unpause",
-        "kill": "kill",
+        "start": start_container,
+        "stop": stop_container,
+        "restart": restart_container,
+        "pause": pause_container,
+        "unpause": unpause_container,
+        "kill": kill_container,
     }
-    action = action_map.get(body.action)
-    if not action:
+    action_fn = action_map.get(body.action)
+    if not action_fn:
         raise HTTPException(400, "Invalid action")
-    code, out, err = _run(["docker", action, name])
-    if code != 0:
-        raise HTTPException(500, err)
-    return {"ok": True, "container": name, "action": action}
+    try:
+        await action_fn(name)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(404, f"Container not found: {name}")
+        raise HTTPException(500, f"Docker error: {e}")
+    except Exception as e:
+        raise HTTPException(500, f"Docker error: {e}")
+    return {"ok": True, "container": name, "action": body.action}
 
 
 @router.delete("/containers/{domain}")
@@ -584,10 +654,18 @@ async def delete_domain_container(domain: str, db=Depends(get_db), _=Depends(req
     if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
         raise HTTPException(400, "Invalid domain name")
     name = container_name(domain)
-    _run(["docker", "stop", name])
-    code, out, err = _run(["docker", "rm", "-f", name])
-    if code != 0:
-        raise HTTPException(500, err)
+    try:
+        await stop_container(name)
+    except Exception:
+        pass  # may already be stopped
+    try:
+        await remove_container(name, force=True)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(404, f"Container not found: {name}")
+        raise HTTPException(500, f"Docker error: {e}")
+    except Exception as e:
+        raise HTTPException(500, f"Docker error: {e}")
     # Release all port allocations for this domain
     await _release_ports(db, domain)
     # Remove DNS zone from PowerDNS.
@@ -600,12 +678,16 @@ async def container_logs(domain: str, tail: int = 100, _=Depends(require_admin))
     if not re.match(r"^[a-zA-Z0-9.-]+$", domain):
         raise HTTPException(400, "Invalid domain name")
     tail = min(max(tail, 1), 1000)
-    tail_str = str(tail)
-    if not re.match(r"^\d+$", tail_str):
-        raise HTTPException(400, "Invalid tail parameter")
     name = resolve_container(domain)
-    code, out, err = _run(["docker", "logs", "--tail", tail_str, name])
-    return {"logs": out, "stderr": err}
+    try:
+        result = await dc_container_logs(name, tail=tail)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(404, f"Container not found: {name}")
+        raise HTTPException(500, f"Docker error: {e}")
+    except Exception as e:
+        raise HTTPException(500, f"Docker error: {e}")
+    return {"logs": result.get("stdout", ""), "stderr": result.get("stderr", "")}
 
 
 class AdminSshKeyRequest(BaseModel):
@@ -680,48 +762,29 @@ async def container_stats(domain: str, db=Depends(get_db), current: User = Depen
         if not result.scalar_one_or_none():
             raise HTTPException(403, "Access denied")
     name = resolve_container(domain)
-    code, out, err = _run([
-        "docker", "stats", "--no-stream", "--format",
-        "{{json .}}", name,
-    ])
-    if code != 0:
-        raise HTTPException(500, err)
-    return json.loads(out) if out else {}
-
-
-def _collect_all_stats() -> dict:
-    """Blocking — run in thread pool. Returns stats keyed by container name."""
-    code, out, err = _run([
-        "docker", "stats", "--no-stream", "--format", "{{json .}}",
-    ])
-    if code != 0:
-        return {}
-    stats: dict = {}
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-            name = row.get("Name") or row.get("ID", "")
-            stats[name] = {
-                "CPUPerc":  row.get("CPUPerc", "—"),
-                "MemUsage": row.get("MemUsage", "—"),
-                "MemPerc":  row.get("MemPerc", "—"),
-                "NetIO":    row.get("NetIO", "—"),
-                "BlockIO":  row.get("BlockIO", "—"),
-            }
-        except Exception:
-            continue
+    try:
+        stats = await dc_container_stats(name)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(404, f"Container not found: {name}")
+        raise HTTPException(500, f"Docker error: {e}")
+    except Exception as e:
+        raise HTTPException(500, f"Docker error: {e}")
     return stats
+
+
+async def _collect_all_stats() -> dict:
+    """Returns stats keyed by container name via the HTTP API."""
+    try:
+        return await all_containers_stats()
+    except Exception:
+        return {}
 
 
 @router.get("/stats")
 async def all_container_stats(_=Depends(require_admin)):
     """
     Return CPU / memory stats for every running container in one call.
-    Offloaded to a thread pool since docker stats --no-stream blocks ~2s.
-    Returns a dict keyed by container name for frontend merging.
+    Uses the Docker HTTP API to gather stats.
     """
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _collect_all_stats)
+    return await _collect_all_stats()

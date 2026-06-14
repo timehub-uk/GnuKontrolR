@@ -1,0 +1,25 @@
+# ── Traefik Dashboard Auth Middleware ────────────────────────────────────────
+# Restricts dashboard access to:
+#   1. The internal Docker subnet (172.30.0.0/16) — for container-to-container
+#   2. The host loopback (127.0.0.1) — for local curl/admin access
+#
+# If you need remote dashboard access, tunnel through SSH or add your public IP
+# to the whitelist below. DO NOT expose the dashboard directly to the internet.
+# ──────────────────────────────────────────────────────────────────────────────
+
+http:
+  middlewares:
+    dashboard-auth:
+      # IP whitelist restricts to Docker bridge + localhost
+      ipWhiteList:
+        sourceRange:
+          - "127.0.0.1/32"
+          - "172.30.0.0/16"
+      # Basic auth adds a second authentication layer
+      basicAuth:
+        realm: "Traefik Dashboard"
+        users:
+          # Default: admin / changeme_traefik_dashboard
+          # Override by mounting a file at /etc/traefik/dynamic/dashboard-users.yml
+          # Username: admin, Password: changeme_traefik_dashboard
+          - "admin:$2y$10$Jb094hSFQnAtymhxkmhhGOr3fE6qoj9uta8QBUXs6tbtwuHLoClQa"

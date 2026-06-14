@@ -3,7 +3,11 @@
  *   - Auto-reconnect with exponential back-off
  *   - Heartbeat ping/pong to detect silent disconnects
  *   - Message queue that drains once the socket re-opens
+ *
+ * Security: Uses short-lived WS-specific token from api.js (not the main
+ * access_token stored directly) to minimise exposure in server access logs.
  */
+import { getAccessToken } from './api';
 
 const MIN_RETRY_MS   = 1_000;
 const MAX_RETRY_MS   = 30_000;
@@ -20,7 +24,7 @@ const PING_TIMEOUT_MS = 5_000;   // close if no pong within 5 s
 export function createWS(path, onMessage, onClose, onOpen) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   // Attach auth token as ?token= query param so protected WS endpoints can validate
-  const token = localStorage.getItem('access_token');
+  const token = getAccessToken();
   const sep   = path.includes('?') ? '&' : '?';
   const authedPath = token ? `${path}${sep}token=${encodeURIComponent(token)}` : path;
   const url   = `${proto}://${location.host}${authedPath}`;

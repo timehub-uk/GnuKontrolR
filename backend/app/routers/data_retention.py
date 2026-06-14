@@ -9,7 +9,7 @@ Provides endpoints for:
 """
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select, delete, and_
@@ -78,21 +78,21 @@ async def trigger_cleanup(
     # 1. Request logs - prune to max entries per user
     # (Already handled per-insert in activity_log.py at 1000 entries)
     # Now also prune by age
-    cutoff = datetime.utcnow() - timedelta(days=RETENTION_CONFIG["request_logs"]["max_age_days"])
+    cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_CONFIG["request_logs"]["max_age_days"])
     result = await db.execute(
         delete(RequestLog).where(RequestLog.created_at < cutoff)
     )
     results["request_logs_pruned"] = result.rowcount
 
     # 2. Consent records older than retention
-    cutoff = datetime.utcnow() - timedelta(days=RETENTION_CONFIG["consent_records"]["max_age_days"])
+    cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_CONFIG["consent_records"]["max_age_days"])
     result = await db.execute(
         delete(ConsentRecord).where(ConsentRecord.granted_at < cutoff)
     )
     results["consent_records_pruned"] = result.rowcount
 
     # 3. Completed DSARs older than retention
-    cutoff = datetime.utcnow() - timedelta(days=RETENTION_CONFIG["completed_dsars"]["max_age_days"])
+    cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_CONFIG["completed_dsars"]["max_age_days"])
     result = await db.execute(
         delete(DataSubjectRequest).where(
             and_(
@@ -104,7 +104,7 @@ async def trigger_cleanup(
     results["completed_dsars_pruned"] = result.rowcount
 
     # 4. Suspended accounts past grace period
-    cutoff = datetime.utcnow() - timedelta(days=RETENTION_CONFIG["suspended_accounts"]["max_age_days"])
+    cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_CONFIG["suspended_accounts"]["max_age_days"])
     result = await db.execute(
         select(User).where(
             User.is_suspended == True,
@@ -146,7 +146,7 @@ async def scheduled_cleanup():
     while True:
         try:
             async with AsyncSessionLocal() as db:
-                cutoff = datetime.utcnow() - timedelta(days=RETENTION_CONFIG["request_logs"]["max_age_days"])
+                cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_CONFIG["request_logs"]["max_age_days"])
                 await db.execute(delete(RequestLog).where(RequestLog.created_at < cutoff))
                 await db.commit()
                 log.info("Scheduled data retention cleanup completed")

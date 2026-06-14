@@ -128,19 +128,40 @@ def generate_dkim_keypair(domain: str, force: bool = False) -> str:
 
     key_dir.mkdir(parents=True, exist_ok=True)
 
+    # Ensure the key directory is group-traversable (GID 1001 — dkim)
+    # so the opendkim container can read keys inside it.
+    dkim_gid = 1001
+    try:
+        key_dir.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP)   # 0o750
+        os.chown(key_dir, -1, dkim_gid)
+    except PermissionError:
+        log.warning("Could not chgrp DKIM key dir to GID %d", dkim_gid)
+
     private_key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=2048,
     )
 
     # Write private key (mode 600 — only the process owner can read it)
+    # L4: DKIM keys are needed in raw PEM by OpenDKIM (external process), so
+    # application-level encryption would break signing.  Protection relies on
+    # strict filesystem permissions (0o600) and container-level isolation.
+    # For compliance environments, mount the DKIM keys directory on an encrypted
+    # filesystem (dm-crypt, eCryptFS, or similar FDE solution).
     pem_private = private_key.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.TraditionalOpenSSL,
         serialization.NoEncryption(),
     )
     priv_path.write_bytes(pem_private)
-    priv_path.chmod(stat.S_IRUSR | stat.S_IWUSR)   # 0o600
+    priv_path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)   # 0o640
+
+    # Grant group (GID 1001 — dkim) read access so the opendkim container can
+    # read this key without running as root.  owner remains panelapi.
+    try:
+        os.chown(priv_path, -1, dkim_gid)   # -1 = don't change UID
+    except PermissionError:
+        log.warning("Could not chgrp DKIM private key to GID %d — opendkim may not be able to read it", dkim_gid)
 
     # Write public key (DER → base64 for DNS TXT)
     pub_der = private_key.public_key().public_bytes(
@@ -161,6 +182,7 @@ def _update_opendkim_tables(domain: str) -> None:
     Both files live at DKIM_KEYS_DIR (the volume mount) so OpenDKIM can read
     them.  opendkim.conf must reference keys/signing.table and keys/key.table.
     """
+    dkim_gid = 1001   # shared GID with opendkim container — used for chgrp below
     signing_table = DKIM_KEYS_DIR / "signing.table"
     key_table     = DKIM_KEYS_DIR / "key.table"
 
@@ -184,6 +206,11 @@ def _update_opendkim_tables(domain: str) -> None:
     try:
         signing_table.write_text("".join(signing_lines))
         key_table.write_text("".join(key_lines))
+        # Make tables group-readable for the opendkim container (GID 1001)
+        signing_table.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)   # 0o640
+        key_table.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
+        os.chown(signing_table, -1, dkim_gid)
+        os.chown(key_table, -1, dkim_gid)
     except OSError as exc:
         log.warning("Could not update OpenDKIM tables: %s", exc)
 
@@ -644,7 +671,7 @@ async def register_vdns(domain: str, subdomain: str, server_ip: str = "") -> str
     return fqdn
 
 
-_PLACEHOLDER_IPS    = {"1.2.3.4", "0.0.0.0", "127.0.0.1", ""}
+_PLACEHOLDER_IPS    = {"198.51.100.1", "0.0.0.0", "127.0.0.1", ""}  # Updated 1.2.3.4 → 198.51.100.1 (RFC 5737)
 _PLACEHOLDER_IPV6   = {"::1", ""}
 _IPV4_SERVICES = [
     "https://api4.ipify.org",

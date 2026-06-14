@@ -9,7 +9,7 @@ A successful verify returns a short-lived JWT scoped to content-viewing.
 import os
 import secrets
 import mimetypes
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Header
@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
 from app.auth import get_current_user, SECRET_KEY, ALGORITHM
+from app.cache import get_redis
 from app.database import get_db
 from app.models.user import User, Role
 
@@ -27,6 +28,10 @@ router = APIRouter(prefix="/api/admin/content", tags=["admin-content"])
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 SITES_ROOT = os.environ.get("SITES_ROOT", "/var/webpanel/sites")
+
+# M14: PIN verification rate limiting
+_PIN_BLOCK_TTL = 900
+_PIN_MAX_FAILS = 5
 
 PIN_TOKEN_EXPIRE_MINUTES = 15
 PIN_TOKEN_SCOPE = "content_viewer"
@@ -56,7 +61,7 @@ def _create_pin_token(user_id: int) -> str:
     payload = {
         "sub": str(user_id),
         "scope": PIN_TOKEN_SCOPE,
-        "exp": datetime.utcnow() + timedelta(minutes=PIN_TOKEN_EXPIRE_MINUTES),
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=PIN_TOKEN_EXPIRE_MINUTES),
         "jti": secrets.token_hex(8),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
@@ -82,8 +87,15 @@ def _safe_path(domain: str, rel: str = "") -> Path:
         raise HTTPException(400, "Invalid domain name")
     if os.path.isabs(rel) or ".." in rel or rel.startswith("/"):
         raise HTTPException(400, "Path traversal or invalid path detected")
-    root = Path(SITES_ROOT).resolve()
-    target = (root / domain / rel).resolve()
+    raw_root = Path(SITES_ROOT)
+    root = raw_root.resolve()
+    candidate = raw_root / domain / rel
+    # L10: Reject symlinks in user-controlled path components
+    root_part_count = len(raw_root.parts)
+    for i in range(root_part_count, len(candidate.parts)):
+        if Path(*candidate.parts[:i+1]).is_symlink():
+            raise HTTPException(400, "Symlinks are not allowed in site paths")
+    target = candidate.resolve()
     try:
         common = os.path.commonpath([str(root), str(target)])
         if common != str(root):
@@ -150,8 +162,52 @@ async def verify_support_pin(
     """Verify the 6-digit PIN and receive a short-lived content-viewer token (15 min)."""
     if not user.support_pin_hash:
         raise HTTPException(400, "No support PIN set. Use /pin/set first.")
+
+    # M14: PIN rate limiting — exponential backoff per user
+    r = await get_redis()
+    if r is not None:
+        try:
+            pin_fail_key = f"admin:pin:fails:{user.id}"
+            pin_block_key = f"admin:pin:blocked:{user.id}"
+            blocked = await r.get(pin_block_key)
+            if blocked:
+                ttl = await r.ttl(pin_block_key)
+                raise HTTPException(
+                    429,
+                    f"Too many incorrect PIN attempts. Try again in {ttl} seconds.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
     if not _verify_pin(body.pin, user.support_pin_hash):
+        # Record failure with exponential backoff
+        if r is not None:
+            try:
+                pin_fail_key = f"admin:pin:fails:{user.id}"
+                count = await r.incr(pin_fail_key)
+                await r.expire(pin_fail_key, _PIN_BLOCK_TTL)
+                if count >= _PIN_MAX_FAILS:
+                    await r.setex(
+                        f"admin:pin:blocked:{user.id}",
+                        min(_PIN_BLOCK_TTL * (count - _PIN_MAX_FAILS + 1), 7200),
+                        1,
+                    )
+            except Exception:
+                pass
         raise HTTPException(403, "Incorrect PIN")
+
+    # Clear PIN fail counters on success
+    if r is not None:
+        try:
+            await r.delete(
+                f"admin:pin:fails:{user.id}",
+                f"admin:pin:blocked:{user.id}",
+            )
+        except Exception:
+            pass
+
     token = _create_pin_token(user.id)
     return {
         "ok": True,

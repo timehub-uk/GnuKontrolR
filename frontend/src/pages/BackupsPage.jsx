@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { HardDrive, History, Plus, Trash2, Download, RefreshCw, AlertTriangle, Globe, Database, FolderOpen, PackageOpen, ArchiveRestore, Upload } from 'lucide-react';
-import api from '../utils/api';
+import api, { getAccessToken } from '../utils/api';
 import ConfigBackupsPanel from '../components/ConfigBackupsPanel';
 import BackupProgressCard from '../components/BackupProgressCard';
 import RecoveryCard from '../components/RecoveryCard';
@@ -83,7 +83,7 @@ export default function BackupsPage() {
   };
 
   const handleDownload = async (filename) => {
-    const token = localStorage.getItem('access_token') || '';
+    const token = getAccessToken() || '';
     try {
       const resp = await fetch(`/api/container/${selectedDomain}/site-backup/download/${filename}`, {
         headers: { Authorization: `Bearer ${token}` },

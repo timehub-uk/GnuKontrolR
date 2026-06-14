@@ -3,15 +3,17 @@ Customer services marketplace.
 Allows customers to install / enable / disable additional services
 inside their domain container: Nginx, Apache, Lighttpd, Node.js,
 Laravel, WordPress, Django, etc.
+
+All docker exec operations use the Docker HTTP API via docker-api-proxy.
 """
 import json
 import re
-import subprocess
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.auth import get_current_user, require_admin
+from app.docker_client import exec_run_sync
 from app.models.user import User, Role
 
 router = APIRouter(prefix="/api/services", tags=["services"])
@@ -166,11 +168,11 @@ def _run_in_container(domain: str, cmd: list[str], timeout: int = 120) -> tuple[
         if not re.match(r"^[a-zA-Z0-9_./\-:={}\[\]\" %*]+$", arg):
             raise ValueError(f"Dangerous argument in command: {arg}")
     container = _container_name(domain)
-    r = subprocess.run(
-        ["docker", "exec", container] + cmd,
-        capture_output=True, text=True, timeout=timeout
-    )
-    return r.returncode, r.stdout.strip(), r.stderr.strip()
+    try:
+        rc, output = exec_run_sync(container, cmd, timeout=timeout)
+        return rc, output, ""
+    except Exception as e:
+        return -1, "", str(e)
 
 
 def _get_container_env(domain: str, key: str) -> str:
@@ -219,10 +221,8 @@ async def list_domain_services(domain: str, user: User = Depends(get_current_use
     """List installed / running services for a domain container."""
     try:
         installed = _detect_installed(domain)
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, "Container not responding")
     except Exception as exc:
-        raise HTTPException(500, str(exc))
+        raise HTTPException(504, f"Container not responding: {exc}")
     return {
         "domain": domain,
         "services": installed,

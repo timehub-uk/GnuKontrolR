@@ -1,6 +1,6 @@
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 30s
+  evaluation_interval: 30s
 
 scrape_configs:
   # Host CPU / memory / disk / network
@@ -10,6 +10,7 @@ scrape_configs:
 
   # Docker container metrics (CPU, mem, net per container)
   - job_name: "cadvisor"
+    scrape_interval: 60s
     static_configs:
       - targets: ["cadvisor:8080"]
 
@@ -23,3 +24,8 @@ scrape_configs:
   # - job_name: "redis"
   #   static_configs:
   #     - targets: ["redis-exporter:9121"]
+
+  # Squid cache proxy metrics
+  - job_name: "squid"
+    static_configs:
+      - targets: ["172.30.0.1:9301"]

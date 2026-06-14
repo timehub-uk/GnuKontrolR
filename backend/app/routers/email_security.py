@@ -12,9 +12,9 @@ Admin-only configuration endpoints; users can view their domain's events.
 import asyncio
 import ipaddress
 import socket
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header as _Header
 from pydantic import BaseModel
 from sqlalchemy import select, delete as sql_delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -188,7 +188,7 @@ async def check_ip(
                 select(DnsblCheckResult).where(
                     DnsblCheckResult.ip == body.ip,
                     DnsblCheckResult.dnsbl_zone == dnsbl.zone,
-                    DnsblCheckResult.expires_at > datetime.utcnow(),
+                    DnsblCheckResult.expires_at > datetime.now(timezone.utc),
                 )
             )).scalar_one_or_none()
             if cached:
@@ -208,16 +208,16 @@ async def check_ip(
         if existing:
             existing.listed = listed
             existing.return_code = return_code
-            existing.checked_at = datetime.utcnow()
-            existing.expires_at = datetime.utcnow() + timedelta(hours=1)
+            existing.checked_at = datetime.now(timezone.utc)
+            existing.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
         else:
             db.add(DnsblCheckResult(
                 ip=body.ip,
                 dnsbl_zone=dnsbl.zone,
                 listed=listed,
                 return_code=return_code,
-                checked_at=datetime.utcnow(),
-                expires_at=datetime.utcnow() + timedelta(hours=1),
+                checked_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
             ))
         await db.commit()
 
@@ -308,7 +308,7 @@ async def update_policy(
     if body.dmarc_check is not None:       policy.dmarc_check = body.dmarc_check
     if body.greylist is not None:          policy.greylist = body.greylist
     if body.rate_limit_per_hour is not None: policy.rate_limit_per_hour = body.rate_limit_per_hour
-    policy.updated_at = datetime.utcnow()
+    policy.updated_at = datetime.now(timezone.utc)
     await db.commit()
     return _policy_dict(policy)
 
@@ -356,12 +356,22 @@ class SblEventIn(BaseModel):
     score: float = 0.0
 
 
+async def _verify_container_token(authorization: str = _Header(None, alias="Authorization")):
+    """Verify the CONTAINER_API_TOKEN is present in the Authorization header.
+    Used for endpoints called by containers on the internal network."""
+    from app.http_client import CONTAINER_API_TOKEN as _global_token
+    if not _global_token:
+        return  # No token configured — allow (backward compat)
+    if authorization and authorization.startswith("Bearer ") and authorization[7:] == _global_token:
+        return
+    raise HTTPException(403, "Invalid or missing container API token")
+
+
 @router.post("/events")
 async def record_sbl_event(
     body: SblEventIn,
     db: AsyncSession = Depends(get_db),
-    # No auth required — called internally from containers via trusted network
-    # Access is restricted to Docker bridge only via Traefik middleware
+    _=Depends(_verify_container_token),
 ):
     event = SblEvent(
         ip=body.ip, sender=body.sender, recipient=body.recipient,
@@ -383,3 +393,24 @@ async def _assert_domain_access(domain: str, user: User, db: AsyncSession) -> No
     )
     if not result.scalar_one_or_none():
         raise HTTPException(403, "Access denied: domain not owned by you")
+
+
+@router.get("/accounts")
+async def get_email_accounts(
+    current: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models.domain import Domain
+    result = await db.execute(select(Domain).where(Domain.owner_id == current.id))
+    domains = result.scalars().all()
+
+    accounts = []
+    for d in domains:
+        for prefix in ("abuse", "postmaster", "webmaster", "hostmaster"):
+            accounts.append({
+                "address": f"{prefix}@{d.name}",
+                "quota": "Unlimited",
+                "used": "0 KB",
+                "domain": d.name,
+            })
+    return {"accounts": accounts}

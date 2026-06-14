@@ -6,25 +6,34 @@ import {
   AlertCircle, Plug, Shield,
 } from 'lucide-react';
 
-// ── Port string parser ────────────────────────────────────────────────────────
-// Input:  "0.0.0.0:32768->80/tcp, 127.0.0.1:9000->9000/tcp, :::32769->443/tcp"
+// ── Port parser ───────────────────────────────────────────────────────────────
+// The Docker API returns Ports as an array of objects OR a CLI-style string:
+//   Array:  [{"IP":"127.0.0.1","PrivatePort":22,"PublicPort":13200,"Type":"tcp"}]
+//   String: "0.0.0.0:32768->80/tcp, 127.0.0.1:9000->9000/tcp"
 // Output: [{ ip, host_port, container_port, proto }]
 function parsePorts(raw) {
   if (!raw || raw === '—') return [];
+  // Array format (Docker API JSON)
+  if (Array.isArray(raw)) {
+    return raw.map(p => ({
+      ip:              p.IP || '',
+      host_port:       String(p.PublicPort || ''),
+      container_port:  String(p.PrivatePort || ''),
+      proto:           p.Type || '',
+    }));
+  }
+  // String format (legacy CLI-style)
   return raw.split(',').map(s => s.trim()).filter(Boolean).map(seg => {
-    // seg: "0.0.0.0:32768->80/tcp"  or  ":::32768->80/tcp"
     const arrow = seg.indexOf('->');
     if (arrow === -1) return { ip: '', host_port: seg, container_port: '', proto: '' };
-    const left  = seg.slice(0, arrow);   // "0.0.0.0:32768" or ":::32768"
-    const right = seg.slice(arrow + 2);  // "80/tcp"
+    const left  = seg.slice(0, arrow);
+    const right = seg.slice(arrow + 2);
     const slashIdx = right.lastIndexOf('/');
     const container_port = slashIdx >= 0 ? right.slice(0, slashIdx) : right;
     const proto          = slashIdx >= 0 ? right.slice(slashIdx + 1) : '';
-    // Split ip and host port — last colon is the port separator
     const colonIdx = left.lastIndexOf(':');
     const ip        = colonIdx >= 0 ? left.slice(0, colonIdx) : '';
     const host_port = colonIdx >= 0 ? left.slice(colonIdx + 1) : left;
-    // Normalise bind addresses
     const ip_display = (!ip || ip === '0.0.0.0' || ip === '::' || ip === ':::') ? '0.0.0.0' : ip;
     return { ip: ip_display, host_port, container_port, proto };
   });

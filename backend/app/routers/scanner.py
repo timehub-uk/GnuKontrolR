@@ -13,7 +13,7 @@ import asyncio
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -180,7 +180,7 @@ async def start_scan(
                 clean += 1
 
     job.status = "done"
-    job.finished_at = datetime.utcnow()
+    job.finished_at = datetime.now(timezone.utc)
     job.total_files = total
     job.infected = infected
     job.clean = clean
@@ -246,7 +246,7 @@ async def resolve_alert(
     if not alert:
         raise HTTPException(404, "Alert not found")
     alert.resolved = True
-    alert.resolved_at = datetime.utcnow()
+    alert.resolved_at = datetime.now(timezone.utc)
     alert.resolved_by = user.id
     await db.commit()
     return {"ok": True}
@@ -419,7 +419,7 @@ async def sanitize_file(
         raise HTTPException(500, str(exc))
 
     # Write backup
-    ts = int(datetime.utcnow().timestamp())
+    ts = int(datetime.now(timezone.utc).timestamp())
     backup_path = f"{body.path}.bak-{ts}"
     try:
         async with panel_client(timeout=15, verify=_TLS_VERIFY) as client:

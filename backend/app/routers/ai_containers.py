@@ -17,13 +17,13 @@ Each AI container has:
   - Runs on webpanel_net so the panel can communicate with it
 
 Admin-only management; start/stop triggered automatically by ai.py.
+Uses the Docker HTTP API via docker-api-proxy (no docker.sock).
 """
 import asyncio
 import logging
 import os
 import re
 import secrets
-import subprocess
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -33,6 +33,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import require_admin, get_current_user
 from app.database import get_db
+from app.docker_client import (
+    list_containers, inspect_container, create_container,
+    start_container, stop_container, remove_container,
+    exec_run,
+)
 from app.models.user import User, Role
 
 router = APIRouter(prefix="/api/ai-containers", tags=["ai-containers"])
@@ -41,7 +46,7 @@ log = logging.getLogger("webpanel")
 NETWORK_NAME  = "webpanel_net"
 AI_IMAGE      = "python:3.12-slim"
 AI_MEMORY_MB  = 512
-AI_CPUS       = "1.0"
+AI_CPUS       = 1.0
 
 # Known AI tool installers
 _TOOL_INSTALL = {
@@ -63,18 +68,20 @@ def _ai_container_name(tool: str, username: str, user_id: int) -> str:
     return f"ai-{tool}-{safe_user}-{user_id}"
 
 
-def _run(cmd: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+async def _container_running(name: str) -> bool:
+    try:
+        info = await inspect_container(name)
+        return info.get("State", {}).get("Running", False)
+    except Exception:
+        return False
 
 
-def _container_running(name: str) -> bool:
-    r = _run(["docker", "inspect", "--format", "{{.State.Running}}", name])
-    return r.stdout.strip() == "true"
-
-
-def _container_exists(name: str) -> bool:
-    r = _run(["docker", "inspect", "--format", "{{.Name}}", name])
-    return r.returncode == 0
+async def _container_exists(name: str) -> bool:
+    try:
+        await inspect_container(name)
+        return True
+    except Exception:
+        return False
 
 
 async def _ensure_ai_container(tool: str, user: User) -> str:
@@ -86,78 +93,87 @@ async def _ensure_ai_container(tool: str, user: User) -> str:
     if tool not in _TOOL_INSTALL:
         raise HTTPException(400, f"Unknown AI tool: {tool!r}. Supported: {list(_TOOL_INSTALL)}")
 
-    name = _ai_container_name(tool, user.username if hasattr(user, 'username') else user.email.split('@')[0], user.id)
-    loop = asyncio.get_running_loop()
+    name = _ai_container_name(
+        tool,
+        user.username if hasattr(user, 'username') else user.email.split('@')[0],
+        user.id,
+    )
 
     # Already running — reuse
-    running = await loop.run_in_executor(None, lambda: _container_running(name))
+    running = await _container_running(name)
     if running:
         log.info("AI container %s already running — reusing", name)
         return name
 
     # Exists but stopped — start it
-    exists = await loop.run_in_executor(None, lambda: _container_exists(name))
+    exists = await _container_exists(name)
     if exists:
         log.info("AI container %s exists (stopped) — starting", name)
-        r = await loop.run_in_executor(None, lambda: _run(["docker", "start", name]))
-        if r.returncode != 0:
-            # Start failed — remove and recreate
-            await loop.run_in_executor(None, lambda: _run(["docker", "rm", "-f", name]))
-        else:
+        try:
+            await start_container(name)
             return name
+        except Exception:
+            # Start failed — remove and recreate
+            try:
+                await remove_container(name, force=True)
+            except Exception:
+                pass
 
     # Create fresh container
     log.info("Creating AI container %s (tool=%s, user_id=%d)", name, tool, user.id)
 
-    def _create():
-        r = _run([
-            "docker", "run", "-d",
-            "--name", name,
-            "--network", NETWORK_NAME,
-            "--restart", "no",              # don't auto-restart — lifecycle managed by panel
-            "--memory", f"{AI_MEMORY_MB}m",
-            "--cpus", AI_CPUS,
-            "--tmpfs", "/tmp:rw,size=128m",
-            "--label", f"gnukontrolr.ai_tool={tool}",
-            "--label", f"gnukontrolr.ai_user={user.id}",
-            "--label", f"gnukontrolr.managed=true",
-            AI_IMAGE,
-            "sleep", "infinity",            # keep alive; AI tool started separately
-        ], timeout=60)
-        return r
-
-    result = await loop.run_in_executor(None, _create)
-    if result.returncode != 0:
-        raise HTTPException(500, f"Failed to create AI container: {result.stderr[:200]}")
+    try:
+        result = await create_container(
+            name=name,
+            image=AI_IMAGE,
+            network=NETWORK_NAME,
+            mem_limit=f"{AI_MEMORY_MB}m",
+            cpus=AI_CPUS,
+            tmpfs={"/tmp": "rw,size=128m"},
+            labels={
+                "gnukontrolr.ai_tool": tool,
+                "gnukontrolr.ai_user": str(user.id),
+                "gnukontrolr.managed": "true",
+            },
+            cmd=["sleep", "infinity"],  # keep alive; AI tool started separately
+            host_config={
+                "RestartPolicy": {"Name": "no"},  # lifecycle managed by panel
+            },
+        )
+        log.info("Container created: %s", result)
+        await start_container(name)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to create AI container: {e}")
 
     # Install the AI tool inside the new container
     install_cmd = _TOOL_INSTALL[tool]
     log.info("Installing %s in container %s …", tool, name)
 
-    def _install():
-        r = _run(
-            ["docker", "exec", name, "sh", "-c", install_cmd],
-            timeout=300,
-        )
-        return r
-
-    install_result = await loop.run_in_executor(None, _install)
-    if "DONE" not in (install_result.stdout + install_result.stderr):
-        log.warning("Tool install may have failed for %s: %s", name, install_result.stderr[:300])
-        # Non-fatal — try to use it anyway; some npm warnings look like errors
+    try:
+        exit_code, output = await exec_run(name, ["sh", "-c", install_cmd])
+        if "DONE" not in output:
+            log.warning("Tool install may have failed for %s: %s", name, output[:300])
+        else:
+            log.info("Tool %s installed in %s (exit=%d)", tool, name, exit_code)
+    except Exception as e:
+        log.warning("Tool install error for %s: %s", name, e)
 
     log.info("AI container %s ready", name)
     return name
 
 
 async def _stop_ai_container(name: str) -> None:
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, lambda: _run(["docker", "stop", name], timeout=15))
+    try:
+        await stop_container(name, timeout=15)
+    except Exception as e:
+        log.warning("Failed to stop AI container %s: %s", name, e)
 
 
 async def _remove_ai_container(name: str) -> None:
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, lambda: _run(["docker", "rm", "-f", name], timeout=15))
+    try:
+        await remove_container(name, force=True)
+    except Exception as e:
+        log.warning("Failed to remove AI container %s: %s", name, e)
 
 
 # ── Public helpers (used by ai.py) ─────────────────────────────────────────────
@@ -182,38 +198,29 @@ async def release_ai_container(tool: str, user: User) -> None:
 @router.get("")
 async def list_ai_containers(_=Depends(require_admin)):
     """List all managed AI containers."""
-    loop = asyncio.get_running_loop()
+    try:
+        containers = await list_containers(
+            all=True,
+            filters={"label": ["gnukontrolr.managed=true"]},
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Docker error: {e}")
 
-    def _list():
-        r = _run([
-            "docker", "ps", "-a",
-            "--filter", "label=gnukontrolr.managed=true",
-            "--filter", "label=gnukontrolr.ai_tool",
-            "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Labels}}",
-        ])
-        rows = []
-        for line in r.stdout.strip().splitlines():
-            if not line.strip():
-                continue
-            parts = line.split("\t")
-            name   = parts[0] if len(parts) > 0 else ""
-            status = parts[1] if len(parts) > 1 else ""
-            image  = parts[2] if len(parts) > 2 else ""
-            labels_raw = parts[3] if len(parts) > 3 else ""
-            labels = {}
-            for lbl in labels_raw.split(","):
-                if "=" in lbl:
-                    k, v = lbl.split("=", 1)
-                    labels[k.strip()] = v.strip()
-            rows.append({
-                "name": name, "status": status, "image": image,
-                "tool":    labels.get("gnukontrolr.ai_tool", ""),
-                "user_id": labels.get("gnukontrolr.ai_user", ""),
-            })
-        return rows
-
-    containers = await loop.run_in_executor(None, _list)
-    return {"containers": containers}
+    rows = []
+    for c in containers:
+        labels = c.get("Labels", {})
+        names = c.get("Names", [])
+        name = names[0].lstrip("/") if names else c.get("Id", "")[:12]
+        status = c.get("Status", "")
+        image = c.get("Image", "")
+        rows.append({
+            "name": name,
+            "status": status,
+            "image": image,
+            "tool":    labels.get("gnukontrolr.ai_tool", ""),
+            "user_id": labels.get("gnukontrolr.ai_user", ""),
+        })
+    return {"containers": rows}
 
 
 @router.delete("/{container_name}")

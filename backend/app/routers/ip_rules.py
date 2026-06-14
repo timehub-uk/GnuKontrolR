@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -135,7 +135,7 @@ async def _fetch_country_cidrs(cc: str, db: Optional[AsyncSession] = None) -> li
     """
     async with _CIDR_LOCK:
         cached = _CIDR_CACHE.get(cc)
-        if cached and (datetime.utcnow() - cached[1]) < _CIDR_TTL:
+        if cached and (datetime.now(timezone.utc) - cached[1]) < _CIDR_TTL:
             return cached[0]
 
     # Try DB first
@@ -149,7 +149,7 @@ async def _fetch_country_cidrs(cc: str, db: Optional[AsyncSession] = None) -> li
             if row and row.cidrs:
                 cidrs = [c for c in row.cidrs.splitlines() if c.strip()]
                 async with _CIDR_LOCK:
-                    _CIDR_CACHE[cc] = (cidrs, datetime.utcnow())
+                    _CIDR_CACHE[cc] = (cidrs, datetime.now(timezone.utc))
                 return cidrs
         except Exception as exc:
             log.debug("DB CIDR lookup failed for %s: %s", cc, exc)
@@ -162,7 +162,7 @@ async def _fetch_country_cidrs(cc: str, db: Optional[AsyncSession] = None) -> li
                 resp = await client.get(url)
             if resp.status_code == 200:
                 cidrs = [line.strip() for line in resp.text.splitlines() if line.strip()]
-                _CIDR_CACHE[cc] = (cidrs, datetime.utcnow())
+                _CIDR_CACHE[cc] = (cidrs, datetime.now(timezone.utc))
                 return cidrs
         except Exception as exc:
             log.warning("Country CIDR live-fetch failed for %s: %s", cc, exc)
@@ -437,7 +437,7 @@ async def set_country_block(
 
     if cb:
         cb.active = body.active
-        cb.updated = datetime.utcnow()
+        cb.updated = datetime.now(timezone.utc)
     else:
         cb = DomainCountryBlock(
             domain_id    = domain.id,

@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import pyotp
@@ -110,6 +110,7 @@ class EnrollResponse(BaseModel):
     uri: str
     device_id: int
     qrcode_b64: str
+    # M8: expected_code intentionally omitted — never leak current TOTP code
 
 
 class VerifyRequest(BaseModel):
@@ -161,6 +162,7 @@ async def enroll_mfa(
     await db.commit()
     await db.refresh(device)
 
+    # M8: Do NOT return expected_code — never leak current TOTP code to client
     return EnrollResponse(
         secret=secret,
         uri=uri,
@@ -182,12 +184,12 @@ async def verify_mfa(
     if device.is_active:
         raise HTTPException(400, "Device already activated")
 
-    totp = pyotp.TOTP(device.secret, algorithm=device.algorithm, digits=device.digits, interval=device.period)
+    totp = pyotp.TOTP(device.secret, digest=device.algorithm, digits=device.digits, interval=device.period)
     if not totp.verify(body.code, valid_window=1):
         raise HTTPException(400, "Invalid verification code. Try a fresh code from your authenticator app.")
 
     device.is_active = True
-    device.last_used = datetime.utcnow()
+    device.last_used = datetime.now(timezone.utc)
 
     # Generate 8 recovery codes (16-char hex each), store hashed on user
     raw_codes = []

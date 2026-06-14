@@ -38,7 +38,7 @@ import csv
 import io
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
@@ -149,7 +149,7 @@ async def withdraw_consent(
         consent_type=consent_type,
         version=record.version,
         granted=False,
-        withdrawn_at=datetime.utcnow(),
+        withdrawn_at=datetime.now(timezone.utc),
     )
     db.add(withdraw)
     await db.commit()
@@ -320,7 +320,7 @@ async def respond_dsar(
         raise HTTPException(404, "DSAR not found")
 
     dsar.status = body.status
-    dsar.completed_at = datetime.utcnow()
+    dsar.completed_at = datetime.now(timezone.utc)
     dsar.completed_by = current.id
     if body.status == "rejected":
         dsar.rejection_reason = body.rejection_reason
@@ -421,7 +421,7 @@ async def confirm_erasure(
             user.preferred_name = ""
 
         dsar.status = "completed"
-        dsar.completed_at = datetime.utcnow()
+        dsar.completed_at = datetime.now(timezone.utc)
         dsar.completed_by = current.id
         purged += 1
 
@@ -445,7 +445,7 @@ async def export_data(
 
     # Collect all user-related data
     export = {
-        "exported_at": datetime.utcnow().isoformat(),
+        "exported_at": datetime.now(timezone.utc).isoformat(),
         "account": {
             "username": user.username,
             "email": user.email,
@@ -786,7 +786,7 @@ async def send_breach_notification(
                     f"Data categories: {breach.data_categories}",
         )
         breach.notified_dpa = True
-        breach.dpa_notified_at = datetime.utcnow()
+        breach.dpa_notified_at = datetime.now(timezone.utc)
         results["dpa_notified"] = True
     except Exception as e:
         log.error("Failed to notify DPA: %s", e)
@@ -800,7 +800,7 @@ async def send_breach_notification(
                     f"Detected: {breach.detected_at.isoformat()}",
         )
         breach.notified_affected = True
-        breach.affected_notified_at = datetime.utcnow()
+        breach.affected_notified_at = datetime.now(timezone.utc)
         results["affected_notified"] = True
     except Exception as e:
         log.error("Failed to notify affected users: %s", e)

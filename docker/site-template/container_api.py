@@ -691,16 +691,16 @@ _install_jobs: dict = {}
 
 APP_DOWNLOADS = {
     "wordpress":  ("https://wordpress.org/latest.tar.gz",                                               "wordpress.tar.gz"),
-    "joomla":     ("https://downloads.joomla.org/cms/joomla5/latest/Joomla_latest-Stable-Full_Package.tar.gz", "joomla.tar.gz"),
+    "joomla":     ("https://github.com/joomla/joomla-cms/releases/download/6.1.1/Joomla_6.1.1-Stable-Full_Package.tar.gz", "joomla.tar.gz"),
     "drupal":     ("https://www.drupal.org/download-latest/tar.gz",                                      "drupal.tar.gz"),
     "grav":       ("https://getgrav.org/download/core/grav/latest",                                      "grav.zip"),
     "roundcube":  ("https://github.com/roundcube/roundcubemail/releases/download/1.6.9/roundcubemail-1.6.9-complete.tar.gz", "roundcube.tar.gz"),
     "snappymail": ("https://github.com/the-djmaze/snappymail/releases/download/v2.38.2/snappymail-2.38.2.tar.gz", "snappymail.tar.gz"),
     "phpmyadmin": ("https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz",  "phpmyadmin.tar.gz"),
     "adminer":    ("https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php",         "adminer.php"),
-    "ghost":        ("https://github.com/TryGhost/Ghost/releases/download/v5.82.2/Ghost-5.82.2.zip",                                                                "ghost.zip"),
-    "october":      ("https://github.com/octobercms/october/archive/refs/tags/v3.5.30.tar.gz",                                                                      "october.tar.gz"),
-    "concrete":     ("https://www.concretecms.org/download_file/-/view/110619/",                                                                                     "concrete.zip"),
+    "ghost":        ("https://registry.npmjs.org/ghost/-/ghost-6.45.0.tgz",                                                                                          "ghost.tgz"),
+    "october":      ("https://github.com/octobercms/october/archive/refs/tags/v4.2.0.tar.gz",                                                                       "october.tar.gz"),
+    "concrete":     ("https://github.com/concretecms/concretecms/releases/download/9.5.2/concrete-cms-9.5.2.zip",                                                    "concrete.zip"),
     "typo3":        ("https://get.typo3.org/12/tar.gz",                                                                                                              "typo3.tar.gz"),
     "strapi":       ("https://registry.npmjs.org/create-strapi-app/-/create-strapi-app-4.25.4.tgz",                                                                  "strapi.tgz"),
     "matomo":       ("https://builds.matomo.org/matomo-5.0.3.zip",                                                                                                   "matomo.zip"),
@@ -712,20 +712,20 @@ APP_DOWNLOADS = {
     "gitea":        ("https://dl.gitea.com/gitea/1.21.11/gitea-1.21.11-linux-amd64",                                                                                "gitea-bin"),
     "codeserver":   ("https://github.com/coder/code-server/releases/download/v4.22.1/code-server-4.22.1-linux-amd64.tar.gz",                                        "codeserver.tar.gz"),
     "n8n":          ("https://registry.npmjs.org/n8n/-/n8n-1.36.4.tgz",                                                                                             "n8n.tgz"),
-    "nodered":      ("https://registry.npmjs.org/@node-red/node-red/-/node-red-3.1.9.tgz",                                                                           "nodered.tgz"),
+    "nodered":      ("https://registry.npmjs.org/node-red/-/node-red-4.1.11.tgz",                                                                                     "nodered.tgz"),
     "filebrowser":  ("https://github.com/filebrowser/filebrowser/releases/download/v2.27.0/linux-amd64-filebrowser.tar.gz",                                         "filebrowser.tar.gz"),
     "uptime":       ("https://github.com/louislam/uptime-kuma/archive/refs/tags/1.23.11.tar.gz",                                                                     "uptime-kuma.tar.gz"),
-    "vaultwarden":  ("https://github.com/dani-garcia/vaultwarden/releases/download/1.30.5/vaultwarden-1.30.5-linux-amd64.tar.gz",                                   "vaultwarden.tar.gz"),
+    "vaultwarden":  ("https://github.com/1f349/vaultwarden-binary/releases/download/1.36.0/vaultwarden-linux-amd64.tar.gz",                                         "vaultwarden.tar.gz"),
     "invoiceninja": ("https://github.com/invoiceninja/invoiceninja/releases/download/v5.8.40/invoiceninja.zip",                                                      "invoiceninja.zip"),
     "prestashop":  ("https://github.com/PrestaShop/PrestaShop/releases/download/8.1.7/prestashop_8.1.7.zip", "prestashop.zip"),
-    "opencart":    ("https://github.com/opencart/opencart/releases/download/4.0.2.3/opencart-4.0.2.3.tar.gz", "opencart.tar.gz"),
+    "opencart":    ("https://github.com/opencart/opencart/releases/download/3.0.5.0/opencart-3.0.5.0.zip", "opencart.zip"),
     "woocommerce": ("https://wordpress.org/latest.tar.gz", "wordpress-woo.tar.gz"),  # WP+WooCommerce
     "piwigo":      ("https://piwigo.org/download/dlcounter.php?code=latest", "piwigo.zip"),
     "lychee":      ("https://github.com/LycheeOrg/Lychee/releases/download/v5.5.1/Lychee.zip", "lychee.zip"),
-    "jellyfin":    ("https://github.com/jellyfin/jellyfin/releases/download/v10.9.2/jellyfin_10.9.2_linux-amd64.tar.gz", "jellyfin.tar.gz"),
+    "jellyfin":    ("https://repo.jellyfin.org/files/server/linux/stable/v10.11.11/amd64/jellyfin_10.11.11-amd64.tar.gz", "jellyfin.tar.gz"),
     "moodle":      ("https://download.moodle.org/download.php/direct/stable404/moodle-latest-404.tgz", "moodle.tgz"),
-    "monica":      ("https://github.com/monicahq/monica/releases/download/v4.1.2/monica-v4.1.2.tar.gz", "monica.tar.gz"),
-    "yourls":      ("https://github.com/YOURLS/YOURLS/releases/download/1.9.2/yourls-1.9.2.zip", "yourls.zip"),
+    "monica":      ("https://github.com/monicahq/monica/releases/download/v4.1.2/monica-v4.1.2.tar.bz2", "monica.tar.bz2"),
+    "yourls":      ("https://github.com/YOURLS/YOURLS/archive/refs/tags/1.10.4.zip", "yourls.zip"),
     "grafana":     ("https://dl.grafana.com/oss/release/grafana-10.4.2.linux-amd64.tar.gz", "grafana.tar.gz"),
     "netdata":     ("https://github.com/netdata/netdata/releases/download/v1.45.0/netdata-v1.45.0.tar.gz", "netdata.tar.gz"),
 }
@@ -1079,12 +1079,13 @@ def _install_ghost(cfg: dict, job_id: str) -> dict:
 
     _push(job_id, "Extracting Ghost…")
     with tempfile.TemporaryDirectory() as tmp:
-        subprocess.run(["unzip", "-q", str(archive), "-d", tmp], check=True, timeout=120)
-        src = Path(tmp)
-        extracted = sorted(src.iterdir())
-        if extracted and extracted[0].is_dir():
-            src = extracted[0]
-        for item in src.iterdir():
+        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=120)
+        src = sorted(Path(tmp).iterdir())
+        # npm packages extract to a "package" directory
+        pkg_dir = Path(tmp) / "package"
+        if pkg_dir.is_dir():
+            src = pkg_dir
+        for item in src.iterdir() if src else Path(tmp).iterdir():
             dst = tgt / item.name
             if dst.exists():
                 shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
@@ -1825,9 +1826,10 @@ def _install_opencart(cfg: dict, job_id: str) -> dict:
     tgt = _target_dir(cfg.get("install_path", "/"))
     _push(job_id, "Extracting OpenCart…")
     with tempfile.TemporaryDirectory() as tmp:
-        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
-        upload_dir = Path(tmp) / "upload"
-        src = upload_dir if upload_dir.exists() else Path(tmp) / sorted(Path(tmp).iterdir())[0]
+        subprocess.run(["unzip", "-q", str(archive), "-d", tmp], check=True, timeout=60)
+        extracted = sorted(Path(tmp).iterdir())
+        upload_dir = Path(tmp) / "upload" if (Path(tmp) / "upload").exists() else None
+        src = upload_dir if upload_dir else (extracted[0] if extracted else Path(tmp))
         for item in src.iterdir():
             dst = tgt / item.name
             if dst.exists():
@@ -1970,7 +1972,7 @@ def _install_monica(cfg: dict, job_id: str) -> dict:
     tgt = _target_dir(cfg.get("install_path", "/"))
     _push(job_id, "Extracting Monica…")
     with tempfile.TemporaryDirectory() as tmp:
-        subprocess.run(["tar", "-xzf", str(archive), "-C", tmp], check=True, timeout=60)
+        subprocess.run(["tar", "-xjf", str(archive), "-C", tmp], check=True, timeout=60)
         src = sorted(Path(tmp).iterdir())[0]
         for item in src.iterdir():
             dst = tgt / item.name

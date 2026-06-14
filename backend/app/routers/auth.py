@@ -1,8 +1,8 @@
 """Authentication endpoints."""
-import ipaddress
 import os
-from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -17,28 +17,32 @@ from app.models.password_policy import PasswordHistory
 from app.auth import (
     verify_password, hash_password,
     create_access_token, create_refresh_token, create_mfa_token,
-    get_current_user, validate_password_strength, oauth2_scheme,
+    get_current_user, get_current_user_from_cookie_or_header,
+    validate_password_strength, oauth2_scheme,
+    set_tokens_in_cookies, clear_auth_cookies,
+    get_token_from_cookie,
+    SECRET_KEY, ALGORITHM, REFRESH_COOKIE,
 )
 from app.cache import get_redis
+from jose import JWTError, jwt
 import pyotp
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-_BLOCK_TTL = 900  # 15 minutes in seconds
-_MAX_FAILS = 5
-
-
-def _is_private_ip(ip: str) -> bool:
-    try:
-        addr = ipaddress.ip_address(ip)
-        return addr.is_private or addr.is_loopback
-    except ValueError:
-        return False
+_BLOCK_TTL            = 900  # 15 minutes in seconds
+_MAX_FAILS            = 5
+_REFRESH_IDLE_TIMEOUT = int(os.environ.get("REFRESH_IDLE_TIMEOUT_SECONDS", "86400"))  # 24h default idle timeout
 
 
 def _get_client_ip(request: Request) -> str:
-    """Return the direct connection IP. X-Forwarded-For is intentionally ignored
-    because port 8000 is publicly reachable and the header is trivially spoofable."""
+    """Return the client IP from X-Forwarded-For (trusting proxy chain) or direct connection.
+    Prefers X-Forwarded-For when behind Traefik, falls back to direct connection."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        # Take the leftmost IP (client's original IP)
+        client_ip = forwarded.split(",")[0].strip()
+        if client_ip:
+            return client_ip
     return request.client.host if request.client else "unknown"
 
 
@@ -81,43 +85,54 @@ class MFALoginRequest(BaseModel):
 
 
 @router.post("/token")
-async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+async def login(
+    request: Request,
+    response: Response,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_db),
+):
     """Step 1: Username/password login. Returns tokens or MFA challenge."""
     client_ip = _get_client_ip(request)
-    is_private = _is_private_ip(client_ip) or client_ip == "unknown"
 
-    # Check if IP is currently blocked (public IPs only)
-    if not is_private:
-        r = await get_redis()
-        if r is not None:
-            try:
-                blocked = await r.get(f"auth:blocked:{client_ip}")
-                if blocked:
-                    raise HTTPException(
-                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                        detail="Too many failed attempts. Try again in 15 minutes.",
-                    )
-            except HTTPException:
-                raise
-            except Exception:
-                pass
+    # Check if IP or username is currently blocked
+    r = await get_redis()
+    if r is not None:
+        try:
+            blocked_ip = await r.get(f"auth:blocked:{client_ip}")
+            blocked_user = await r.get(f"auth:user:blocked:{form_data.username}")
+            if blocked_ip or blocked_user:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many failed attempts. Try again in 15 minutes.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
 
     result = await db.execute(select(User).where(User.username == form_data.username))
     user = result.scalar_one_or_none()
     auth_ok = user is not None and verify_password(form_data.password, user.hashed_password)
 
     if not auth_ok:
-        if not is_private:
-            r = await get_redis()
-            if r is not None:
-                try:
-                    fail_key = f"auth:fails:{client_ip}"
-                    count = await r.incr(fail_key)
-                    await r.expire(fail_key, _BLOCK_TTL)
-                    if count >= _MAX_FAILS:
-                        await r.setex(f"auth:blocked:{client_ip}", _BLOCK_TTL, 1)
-                except Exception:
-                    pass
+        r = await get_redis()
+        if r is not None:
+            try:
+                # M15: Per-IP rate limiting (existing)
+                fail_key = f"auth:fails:{client_ip}"
+                count = await r.incr(fail_key)
+                await r.expire(fail_key, _BLOCK_TTL)
+                if count >= _MAX_FAILS:
+                    await r.setex(f"auth:blocked:{client_ip}", _BLOCK_TTL, 1)
+
+                # M15: Per-username rate limiting (prevents distributed brute-force)
+                user_fail_key = f"auth:user:fails:{form_data.username}"
+                user_count = await r.incr(user_fail_key)
+                await r.expire(user_fail_key, _BLOCK_TTL)
+                if user_count >= _MAX_FAILS:
+                    await r.setex(f"auth:user:blocked:{form_data.username}", _BLOCK_TTL, 1)
+            except Exception:
+                pass
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     if not user.is_active:
@@ -125,14 +140,18 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     if user.is_suspended:
         raise HTTPException(status_code=403, detail="Account suspended")
 
-    # Clear failure counter on success
-    if not is_private:
-        r = await get_redis()
-        if r is not None:
-            try:
-                await r.delete(f"auth:fails:{client_ip}", f"auth:blocked:{client_ip}")
-            except Exception:
-                pass
+    # Clear failure counters on success (M15: both IP and username)
+    r = await get_redis()
+    if r is not None:
+        try:
+            await r.delete(
+                f"auth:fails:{client_ip}",
+                f"auth:blocked:{client_ip}",
+                f"auth:user:fails:{form_data.username}",
+                f"auth:user:blocked:{form_data.username}",
+            )
+        except Exception:
+            pass
 
     # Check for active MFA devices
     mfa_result = await db.execute(
@@ -155,17 +174,23 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             ],
         }
 
-    return TokenResponse(
-        access_token=create_access_token(user.id, user.role, mfa_verified=False),
-        refresh_token=create_refresh_token(user.id),
+    # Set httpOnly cookies for XSS-safe session persistence
+    access_token  = create_access_token(user.id, user.role, mfa_verified=False)
+    refresh_token = create_refresh_token(user.id)
+    token_resp = TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
         role=user.role,
         username=user.username,
     )
+    set_tokens_in_cookies(response, access_token, refresh_token)
+    return token_resp
 
 
 @router.post("/mfa-verify")
 async def mfa_verify(
     body: MFALoginRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     """Step 2: Verify MFA code with temporary token to complete login."""
@@ -197,12 +222,12 @@ async def mfa_verify(
     for device in devices:
         totp = pyotp.TOTP(
             device.secret,
-            algorithm=device.algorithm,
+            digest=device.algorithm,
             digits=device.digits,
             interval=device.period,
         )
         if totp.verify(body.code, valid_window=1):
-            device.last_used = datetime.utcnow()
+            device.last_used = datetime.now(timezone.utc)
             verified = True
             break
 
@@ -216,12 +241,17 @@ async def mfa_verify(
     if not user:
         raise HTTPException(401, "User not found")
 
-    return TokenResponse(
-        access_token=create_access_token(user.id, user.role, mfa_verified=True),
-        refresh_token=create_refresh_token(user.id),
+    # Set httpOnly cookies
+    access_token  = create_access_token(user.id, user.role, mfa_verified=True)
+    refresh_token = create_refresh_token(user.id)
+    token_resp = TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
         role=user.role,
         username=user.username,
     )
+    set_tokens_in_cookies(response, access_token, refresh_token)
+    return token_resp
 
 
 @router.post("/register", status_code=201)
@@ -352,7 +382,7 @@ async def change_password(
     new_hash = hash_password(req.new_password)
     old_hash = current.hashed_password
     current.hashed_password = new_hash
-    current.password_changed_at = datetime.utcnow()
+    current.password_changed_at = datetime.now(timezone.utc)
 
     # 5. Archive old password to history (keep last N)
     # Use PASSWORD_HISTORY from env or default to 5
@@ -374,31 +404,200 @@ async def change_password(
             )
         )
 
+    from app.routers.setup import _apply_password_rotation_task
+
+    # Run database ALTERs in background
+    asyncio.create_task(_apply_password_rotation_task(req.new_password))
+
+    # Recreate all site containers
+    from app.models.domain import Domain
+    from app.routers.domains import _create_container_for_domain
+    from app.docker_client import stop_container, remove_container
+
+    result_domains = await db.execute(select(Domain))
+    domains = result_domains.scalars().all()
+
+    for domain in domains:
+        name = f"site_{domain.name.replace('.', '_').replace('-', '_')}"
+        try:
+            await stop_container(name)
+        except Exception:
+            pass
+        try:
+            await remove_container(name, force=True)
+        except Exception:
+            pass
+
+        asyncio.create_task(_create_container_for_domain(domain.name, domain.php_version or "8.2", db, owner_email=domain.acme_email))
+
     await db.commit()
 
     return {"ok": True, "message": "Password changed successfully."}
 
 
+@router.get("/session")
+async def get_session(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Restore a session from the httpOnly refresh cookie (page reload).
+
+    If a valid refresh_token cookie exists, returns a new access_token and user info.
+    The frontend stores the access_token in memory and sends it as Bearer header.
+    """
+    from app.auth import ACCESS_COOKIE
+    # Try access token cookie first (faster, no DB hit)
+    access_cookie = get_token_from_cookie(request, ACCESS_COOKIE)
+    if access_cookie:
+        try:
+            payload = jwt.decode(access_cookie, SECRET_KEY, algorithms=[ALGORITHM])
+            if payload.get("type") == "access":
+                user_id = int(payload["sub"])
+                user = await db.get(User, user_id)
+                if user and user.is_active and not user.is_suspended:
+                    return {
+                        "access_token": access_cookie,
+                        "token_type": "bearer",
+                        "role": user.role,
+                        "username": user.username,
+                        "id": user.id,
+                        "email": user.email,
+                    }
+        except (JWTError, KeyError, ValueError):
+            pass  # Fall through to refresh token
+
+    # Fall back to refresh token cookie
+    refresh_cookie = get_token_from_cookie(request, REFRESH_COOKIE)
+    if refresh_cookie:
+        try:
+            payload = jwt.decode(refresh_cookie, SECRET_KEY, algorithms=[ALGORITHM])
+            if payload.get("type") == "refresh":
+                user_id = int(payload["sub"])
+                user = await db.get(User, user_id)
+                if user and user.is_active and not user.is_suspended:
+                    access_token = create_access_token(user.id, user.role)
+                    refresh_token = create_refresh_token(user.id)
+                    response = JSONResponse({
+                        "access_token": access_token,
+                        "token_type": "bearer",
+                        "role": user.role,
+                        "username": user.username,
+                        "id": user.id,
+                        "email": user.email,
+                    })
+                    # Rotate refresh token and set new cookies
+                    set_tokens_in_cookies(response, access_token, refresh_token)
+                    # Blacklist old refresh token
+                    r = await get_redis()
+                    if r:
+                        try:
+                            await r.setex(f"token:blacklisted:{refresh_cookie}", 86400, 1)
+                        except Exception:
+                            pass
+                    return response
+        except (JWTError, KeyError, ValueError):
+            pass
+
+    # No valid session
+    response = JSONResponse({"detail": "No active session"}, status_code=401)
+    clear_auth_cookies(response)
+    return response
+
+
+@router.post("/refresh")
+async def refresh_token(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Exchange a refresh token (from httpOnly cookie) for new tokens."""
+    refresh_cookie = get_token_from_cookie(request, REFRESH_COOKIE)
+    if not refresh_cookie:
+        raise HTTPException(401, "No refresh token")
+
+    # Check blacklist
+    r = await get_redis()
+    if r:
+        try:
+            blocked = await r.get(f"token:blacklisted:{refresh_cookie}")
+            if blocked:
+                raise HTTPException(401, "Token revoked")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    try:
+        payload = jwt.decode(refresh_cookie, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(401, "Invalid token type")
+        # M10: Check refresh token idle timeout — reject if token hasn't been
+        # rotated within the idle window (even if not yet expired).
+        iat = payload.get("iat")
+        if iat is not None:
+            elapsed = datetime.now(timezone.utc).timestamp() - iat
+            if elapsed > _REFRESH_IDLE_TIMEOUT:
+                raise HTTPException(401, "Session expired due to inactivity. Please log in again.")
+        user_id = int(payload["sub"])
+    except HTTPException:
+        raise
+    except (JWTError, ValueError):
+        raise HTTPException(401, "Invalid or expired refresh token")
+
+    user = await db.get(User, user_id)
+    if not user or not user.is_active or user.is_suspended:
+        raise HTTPException(401, "User not found or inactive")
+
+    # Issue new tokens
+    access_token  = create_access_token(user.id, user.role)
+    new_refresh   = create_refresh_token(user.id)
+
+    # Blacklist old refresh token
+    if r:
+        try:
+            await r.setex(f"token:blacklisted:{refresh_cookie}", 86400, 1)
+        except Exception:
+            pass
+
+    response = JSONResponse({
+        "access_token": access_token,
+        "refresh_token": new_refresh,
+        "token_type": "bearer",
+        "role": user.role,
+        "username": user.username,
+    })
+    set_tokens_in_cookies(response, access_token, new_refresh)
+    return response
+
+
 @router.post("/logout", status_code=204)
 async def logout(
     request: Request,
-    current: User = Depends(get_current_user),
-    token: str = Depends(oauth2_scheme),
+    current: User = Depends(get_current_user_from_cookie_or_header),
+    token: str = "",
 ):
-    """Logout the user and invalidate the JWT token via Redis blocklist."""
-    from app.auth import SECRET_KEY, ALGORITHM
-    from jose import jwt
-    r = await get_redis()
-    if r is not None:
-        try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            exp = payload.get("exp", 0)
-            now = datetime.utcnow().timestamp()
-            ttl = int(exp - now) if exp > now else 3600
-            # Blacklist the token in Redis
-            await r.setex(f"token:blacklisted:{token}", ttl, 1)
-        except Exception as e:
-            # log warning
-            import logging
-            logging.getLogger("webpanel.auth").warning("Failed to blacklist token: %s", e)
-    return
+    """Logout the user and invalidate the JWT token via Redis blocklist.
+    Clears httpOnly cookies so the session cannot be restored."""
+    # Get token from Authorization header or cookie
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = get_token_from_cookie(request, ACCESS_COOKIE) or ""
+
+    if token:
+        r = await get_redis()
+        if r is not None:
+            try:
+                payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+                exp = payload.get("exp", 0)
+                now = datetime.now(timezone.utc).timestamp()
+                ttl = int(exp - now) if exp > now else 3600
+                await r.setex(f"token:blacklisted:{token}", ttl, 1)
+            except Exception as e:
+                import logging
+                logging.getLogger("webpanel.auth").warning("Failed to blacklist token: %s", e)
+
+    # Clear auth cookies
+    response = Response(status_code=204)
+    clear_auth_cookies(response)
+    return response

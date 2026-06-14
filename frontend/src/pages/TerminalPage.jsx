@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Terminal } from 'lucide-react';
+import { getAccessToken } from '../utils/api';
 
 export default function TerminalPage() {
   const containerRef = useRef(null);
@@ -18,7 +19,7 @@ export default function TerminalPage() {
       fitAddon.fit();
 
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const token = localStorage.getItem('access_token') || '';
+      const token = getAccessToken() || '';
       ws = new WebSocket(`${proto}://${location.host}/api/terminal/ws?token=${encodeURIComponent(token)}`);
       ws.onopen    = () => term.writeln('\x1b[32mConnected to WebPanel Terminal\x1b[0m\r\n');
       ws.onmessage = e => term.write(e.data);

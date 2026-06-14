@@ -34,7 +34,8 @@ class Domain(Base):
     php_version = Column(String(16), default="8.2")
     redirect_to = Column(String(512), nullable=True)
     acme_email  = Column(String(128), nullable=True)   # domain owner's email — used as ACME/LE contact
-    created_at  = Column(DateTime, default=datetime.utcnow)
-    updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at          = Column(DateTime, default=datetime.utcnow)
+    updated_at          = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    container_api_token = Column(String(128), nullable=True)  # H9: per-domain unique API token
 
     owner = relationship("User", back_populates="domains")

@@ -8,17 +8,18 @@ import json
 import re
 import socket
 import ssl
-import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.auth import get_current_user, require_admin
 from app.database import get_db
+from app.docker_client import start_container, inspect_container
 from app.models.domain import Domain
 from app.models.user import User, Role
 
@@ -65,28 +66,26 @@ async def _check_ssl(domain: str) -> dict:
 
 
 async def _check_container_running(domain: str) -> dict:
+    from app.docker_client import inspect_container
     name = "site_" + domain.replace(".", "_").replace("-", "_")
-    loop = asyncio.get_running_loop()
-    def _run():
-        r = subprocess.run(
-            ["docker", "inspect", "--format", "{{.State.Running}}", name],
-            capture_output=True, text=True, timeout=5
-        )
-        return r.returncode, r.stdout.strip()
     try:
-        code, out = await loop.run_in_executor(None, _run)
-        if code != 0:
+        info = await inspect_container(name)
+        running = info.get("State", {}).get("Running", False)
+        if running:
+            return {"id": "container_running", "severity": "pass", "title": "Container Running",
+                    "message": "Domain container is active."}
+        return {"id": "container_running", "severity": "high", "title": "Container Stopped",
+                "message": f"Container {name} is not running.",
+                "auto_fixable": True,
+                "remediation": f"docker start {name}"}
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
             return {"id": "container_running", "severity": "critical", "title": "Container Not Found",
                     "message": f"No container found for {domain}.",
                     "auto_fixable": False,
                     "remediation": "Create the domain container from the Containers page."}
-        if out != "true":
-            return {"id": "container_running", "severity": "high", "title": "Container Stopped",
-                    "message": f"Container {name} is not running.",
-                    "auto_fixable": True,
-                    "remediation": f"docker start {name}"}
-        return {"id": "container_running", "severity": "pass", "title": "Container Running",
-                "message": "Domain container is active."}
+        return {"id": "container_running", "severity": "medium", "title": "Container Check Failed",
+                "message": str(e)}
     except Exception as e:
         return {"id": "container_running", "severity": "medium", "title": "Container Check Failed",
                 "message": str(e)}
@@ -241,7 +240,7 @@ async def run_all_checks(domain: str) -> list[dict]:
 async def security_check(domain: str, _=Depends(get_current_user)):
     checks = await run_all_checks(domain)
     score  = round(100 * sum(1 for c in checks if c["severity"] == "pass") / max(len(checks), 1))
-    return {"domain": domain, "score": score, "checks": checks, "checked_at": datetime.utcnow().isoformat()}
+    return {"domain": domain, "score": score, "checks": checks, "checked_at": datetime.now(timezone.utc).isoformat()}
 
 
 # ── WebSocket duplex ──────────────────────────────────────────────────────────
@@ -390,17 +389,13 @@ async def auto_fix(
     # ── Container not running ─────────────────────────────────────────────────
     if check_id == "container_running":
         name = "site_" + domain.replace(".", "_").replace("-", "_")
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                ["docker", "start", name],
-                capture_output=True, text=True, timeout=15,
-            ),
-        )
-        if result.returncode != 0:
-            raise HTTPException(500, f"docker start failed: {result.stderr}")
-        return {"ok": True, "message": f"Container {name} started."}
+        try:
+            await start_container(name)
+            return {"ok": True, "message": f"Container {name} started."}
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(500, f"Docker start failed: {e.response.text}")
+        except Exception as e:
+            raise HTTPException(500, f"Failed to start container: {e}")
 
     raise HTTPException(400, f"No auto-fix available for check_id: {check_id!r}")
 
@@ -410,26 +405,20 @@ async def auto_fix(
 _threats_cache: dict | None = None
 _threats_cache_ts: float = 0
 _THREATS_TTL = 300  # 5 minutes
+_threats_fetching = False
 
 
-@router.get("/threats")
-async def get_threats(_=Depends(get_current_user)):
-    """
-    Return recent CISA Known Exploited Vulnerabilities (KEV) catalog entries.
-    Cached for 5 minutes to avoid hammering the CISA API.
-    """
-    global _threats_cache, _threats_cache_ts
-    now = time.time()
-    if _threats_cache is not None and (now - _threats_cache_ts) < _THREATS_TTL:
-        return _threats_cache
-
+async def _fetch_threats_bg():
+    global _threats_cache, _threats_cache_ts, _threats_fetching
+    if _threats_fetching:
+        return
+    _threats_fetching = True
     try:
         import httpx
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get("https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json")
             r.raise_for_status()
             data = r.json()
-        # Return the 20 most recently added vulnerabilities
         vulns = data.get("vulnerabilities", [])
         vulns_sorted = sorted(vulns, key=lambda v: v.get("dateAdded", ""), reverse=True)[:20]
         threats = []
@@ -454,15 +443,31 @@ async def get_threats(_=Depends(get_current_user)):
                 "nvd_url": f"https://nvd.nist.gov/vuln/detail/{v.get('cveID', '')}",
             })
         result = {"threats": threats, "count": len(data.get("vulnerabilities", [])),
-                  "catalog_version": data.get("catalogVersion", ""), "fetched_at": datetime.utcnow().isoformat()}
+                  "catalog_version": data.get("catalogVersion", ""), "fetched_at": datetime.now(timezone.utc).isoformat()}
         _threats_cache = result
-        _threats_cache_ts = now
-        return result
+        _threats_cache_ts = time.time()
     except Exception as e:
         import logging
-        logging.getLogger(__name__).exception("Failed to fetch CISA KEV catalog")
-        return {"threats": [], "count": 0, "catalog_version": "", "error": "Internal server error",
-                "fetched_at": datetime.utcnow().isoformat()}
+        logging.getLogger(__name__).exception("Failed to fetch CISA KEV catalog in background")
+    finally:
+        _threats_fetching = False
+
+
+@router.get("/threats")
+async def get_threats(_=Depends(get_current_user)):
+    """
+    Return recent CISA Known Exploited Vulnerabilities (KEV) catalog entries.
+    Cached for 5 minutes to avoid hammering the CISA API. Fetched in a background task.
+    """
+    global _threats_cache, _threats_cache_ts
+    now = time.time()
+    if _threats_cache is None or (now - _threats_cache_ts) >= _THREATS_TTL:
+        asyncio.create_task(_fetch_threats_bg())
+
+    if _threats_cache is None:
+        return {"threats": [], "count": 0, "catalog_version": "",
+                "fetched_at": datetime.now(timezone.utc).isoformat()}
+    return _threats_cache
 
 
 @router.delete("/threats/cache")

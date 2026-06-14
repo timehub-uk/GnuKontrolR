@@ -858,7 +858,7 @@ cmd_test() {
 
   # Login
   TOKEN=$(curl -sf -X POST "$API/api/auth/token" \
-    -d "username=admin&password=test123" 2>/dev/null \
+    -d "username=admin&password=admin" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || true)
 
   if [[ -n "$TOKEN" ]]; then

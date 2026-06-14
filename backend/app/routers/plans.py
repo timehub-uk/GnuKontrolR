@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.database import get_db
 from app.models.hosting_plan import HostingPlan
@@ -119,7 +119,7 @@ async def update_plan(plan_id: int, body: PlanUpdate, db: AsyncSession = Depends
         raise HTTPException(404, "Plan not found")
     for field, val in body.model_dump(exclude_none=True).items():
         setattr(plan, field, val)
-    plan.updated_at = datetime.utcnow()
+    plan.updated_at = datetime.now(timezone.utc)
     await db.commit()
     return _plan_dict(plan)
 

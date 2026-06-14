@@ -12,7 +12,7 @@ Public (authenticated) endpoints:
 """
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -91,15 +91,15 @@ async def sync_countries(
                 existing.flag_svg = r["flag"]
             if r["cidrs"] is not None:
                 existing.cidrs    = r["cidrs"]
-                existing.cidrs_at = datetime.utcnow()
-            existing.updated_at = datetime.utcnow()
+                existing.cidrs_at = datetime.now(timezone.utc)
+            existing.updated_at = datetime.now(timezone.utc)
         else:
             db.add(CountryData(
                 country_code = r["cc"],
                 country_name = r["name"],
                 flag_svg     = r["flag"],
                 cidrs        = r["cidrs"],
-                cidrs_at     = datetime.utcnow() if r["cidrs"] else None,
+                cidrs_at     = datetime.now(timezone.utc) if r["cidrs"] else None,
             ))
         updated += 1
 
@@ -133,14 +133,14 @@ async def refresh_cidrs(
         )).scalar_one_or_none()
         if row:
             row.cidrs    = cidrs
-            row.cidrs_at = datetime.utcnow()
+            row.cidrs_at = datetime.now(timezone.utc)
         else:
             from app.routers.ip_rules import _COUNTRY_MAP
             db.add(CountryData(
                 country_code = cc,
                 country_name = _COUNTRY_MAP.get(cc, cc),
                 cidrs        = cidrs,
-                cidrs_at     = datetime.utcnow(),
+                cidrs_at     = datetime.now(timezone.utc),
             ))
 
     async with httpx.AsyncClient() as client:

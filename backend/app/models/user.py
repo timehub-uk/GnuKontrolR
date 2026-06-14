@@ -20,6 +20,7 @@ class User(Base):
     username        = Column(String(64),  unique=True, nullable=False, index=True)
     email           = Column(String(128), unique=True, nullable=False)
     hashed_password = Column(String(256), nullable=False)
+    encrypted_password = Column(EncryptedString(256), nullable=True, default=None)
     full_name       = Column(EncryptedString(128), default="")
     role            = Column(SAEnum(Role), default=Role.user, nullable=False)
     is_active       = Column(Boolean, default=True)

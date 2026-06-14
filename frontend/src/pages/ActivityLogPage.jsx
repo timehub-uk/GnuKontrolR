@@ -8,7 +8,7 @@ import {
   ScrollText, RefreshCw, Trash2, CheckCircle,
   AlertCircle, AlertTriangle, Info, Clock, Hash, Radio,
 } from 'lucide-react';
-import api from '../utils/api';
+import api, { getAccessToken } from '../utils/api';
 import { createSSE } from '../utils/sse';
 
 // ── Human-readable status explanations ───────────────────────────────────────
@@ -181,7 +181,7 @@ export default function ActivityLogPage() {
   // SSE live feed — prepends new events as they arrive
   useEffect(() => {
     if (!live) { sseRef.current?.close(); sseRef.current = null; return; }
-    const token = localStorage.getItem('access_token') || '';
+    const token = getAccessToken() || '';
     sseRef.current = createSSE('/api/log/stream', event => {
       setEntries(prev => {
         if (prev.some(e => e.event_id === event.event_id)) return prev;

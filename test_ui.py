@@ -14,7 +14,7 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 
 BASE_URL = "http://localhost:8000"
 USERNAME = "admin"
-PASSWORD = "test123"
+PASSWORD = "admin"
 
 # Pages to visit (route, display name, expected selector hints)
 PAGES = [

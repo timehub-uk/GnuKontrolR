@@ -4,9 +4,15 @@ AI agent instruction file management.
 Agent files live at /etc/gnukontrolr/agents/{agent_id}.md inside each domain
 container — root-owned (440), outside the web root and SFTP scope.
 OpenCode reads AGENTS.md from its CWD (/etc/gnukontrolr/).
+
+All docker exec operations use the Docker HTTP API via docker-api-proxy.
 """
 import asyncio
-import subprocess
+import logging
+
+from app.docker_client import exec_run_sync
+
+log = logging.getLogger("webpanel")
 
 # ── Agent registry ────────────────────────────────────────────────────────────
 
@@ -131,7 +137,7 @@ Focus on DEFENSIVE security only. Do NOT assist with offensive security techniqu
 # ── File operations ────────────────────────────────────────────────────────────
 
 async def write_agent_file(container: str, agent_id: str, domain: str) -> None:
-    """Write a single agent instruction file into the container via stdin pipe."""
+    """Write a single agent instruction file into the container."""
     if not container or not container.startswith("site_"):
         raise ValueError(f"Invalid container name: {container!r}")
     if agent_id not in AGENT_REGISTRY:
@@ -143,28 +149,18 @@ async def write_agent_file(container: str, agent_id: str, domain: str) -> None:
 
     def _write():
         # Ensure directory exists
-        r_mkdir = subprocess.run(
-            ["docker", "exec", container, "mkdir", "-p", "/etc/gnukontrolr/agents"],
-            capture_output=True,
-        )
-        if r_mkdir.returncode != 0:
-            raise RuntimeError(f"Failed to create agent directory: {r_mkdir.stderr.decode()}")
+        rc, out = exec_run_sync(container, ["mkdir", "-p", "/etc/gnukontrolr/agents"])
+        if rc != 0:
+            raise RuntimeError(f"Failed to create agent directory: {out}")
         # Write file via stdin to avoid shell injection
-        r = subprocess.run(
-            ["docker", "exec", "-i", container, "tee", dest],
-            input=content.encode(),
-            capture_output=True,
-            check=False,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(f"Failed to write agent file {dest}: {r.stderr.decode()}")
+        # Use tee with stdin
+        rc, out = exec_run_sync(container, ["tee", dest], stdin=content)
+        if rc != 0:
+            raise RuntimeError(f"Failed to write agent file {dest}: {out}")
         # Set permissions: root-owned, read-only
-        r_chmod = subprocess.run(
-            ["docker", "exec", container, "chmod", "440", dest],
-            capture_output=True,
-        )
-        if r_chmod.returncode != 0:
-            raise RuntimeError(f"Failed to set permissions on {dest}: {r_chmod.stderr.decode()}")
+        rc, out = exec_run_sync(container, ["chmod", "440", dest])
+        if rc != 0:
+            raise RuntimeError(f"Failed to set permissions on {dest}: {out}")
 
     await loop.run_in_executor(None, _write)
 
@@ -187,15 +183,9 @@ async def activate_agent(container: str, agent_id: str) -> None:
 
     def _link():
         # Remove existing symlink/file
-        subprocess.run(
-            ["docker", "exec", container, "rm", "-f", link],
-            capture_output=True, check=False,
-        )
-        r = subprocess.run(
-            ["docker", "exec", container, "ln", "-s", src, link],
-            capture_output=True,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(f"Failed to activate agent: {r.stderr.decode()}")
+        exec_run_sync(container, ["rm", "-f", link])
+        rc, out = exec_run_sync(container, ["ln", "-s", src, link])
+        if rc != 0:
+            raise RuntimeError(f"Failed to activate agent: {out}")
 
     await loop.run_in_executor(None, _link)

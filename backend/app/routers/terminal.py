@@ -2,25 +2,35 @@
 WebSocket terminal — spawns an interactive bash shell inside the container,
 proxies stdin/stdout, and sends a custom MOTD with user + domain status.
 Superadmin/admin only.
+
+M12: WebSocket connections use a short-lived token (30s TTL) obtained from a
+REST endpoint, instead of passing the full JWT in the query string.  This
+prevents credential leakage via server logs, Referer headers, or browser
+history.
 """
 import asyncio
+import json
 import os
 import pty
+import secrets
 import struct
 import fcntl
 import termios
-import json
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
+from app.cache import get_redis
 from app.database import get_db
 from app.models.user import User, Role
 from app.models.domain import Domain, DomainStatus
 
 router = APIRouter(prefix="/api/terminal", tags=["terminal"])
+
+_WS_TOKEN_TTL = 30  # seconds — short-lived WS token
 
 
 async def _build_motd(user: User, db: AsyncSession) -> str:
@@ -66,21 +76,58 @@ async def _build_motd(user: User, db: AsyncSession) -> str:
     return "\r\n".join(lines) + "\r\n"
 
 
+@router.get("/token")
+async def generate_ws_token(user: User = Depends(get_current_user)):
+    """M12: Exchange your authenticated session for a short-lived WebSocket token
+    (30-second TTL).  The frontend uses this token in ?ws_token= instead of
+    passing the real JWT in the query string."""
+    if user.role not in (Role.superadmin, Role.admin):
+        raise HTTPException(403, "Only admins and superadmins can access the terminal")
+
+    ws_token = secrets.token_urlsafe(32)
+    r = await get_redis()
+    if r is not None:
+        try:
+            await r.setex(f"ws_token:{ws_token}", _WS_TOKEN_TTL, user.id)
+        except Exception:
+            pass
+    return JSONResponse({"ws_token": ws_token, "expires_in": _WS_TOKEN_TTL})
+
+
 @router.websocket("/ws")
 async def terminal_ws(websocket: WebSocket, db: AsyncSession = Depends(get_db)):
     """
     Authenticated WebSocket terminal.
-    - Accepts token via ?token= query param (browsers can't set WS headers).
+    - Accepts short-lived token via ?ws_token= query param (M12).
     - Spawns /bin/bash in a PTY; proxies data bidirectionally.
     - Sends MOTD on connect.
     """
-    token = websocket.query_params.get("token", "")
-    # Validate token before accepting
-    from app.auth import _decode_token
-    user_id = _decode_token(token)
+    ws_token = websocket.query_params.get("ws_token", "")
+
+    # Validate short-lived token from Redis
+    user_id = None
+    r = await get_redis()
+    if r is not None:
+        try:
+            user_id_str = await r.get(f"ws_token:{ws_token}")
+            if user_id_str:
+                user_id = int(user_id_str)
+                await r.delete(f"ws_token:{ws_token}")  # single-use
+        except Exception:
+            pass
+
+    if not user_id:
+        # M12: Fallback: accept a full JWT via ?token= for backward compat during
+        # rollout (remove this fallback in a future release).
+        token = websocket.query_params.get("token", "")
+        if token:
+            from app.auth import _decode_token
+            user_id = _decode_token(token)
+
     if not user_id:
         await websocket.close(code=4001)
         return
+
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user or not user.is_active:

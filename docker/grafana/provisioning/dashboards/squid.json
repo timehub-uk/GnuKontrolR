@@ -1,0 +1,260 @@
+{
+  "title": "Squid Cache Proxy",
+  "uid": "squid-proxy",
+  "tags": ["squid", "proxy"],
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "browser",
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Squid Status",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "squid_up",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "color": { "mode": "thresholds" },
+          "unit": "none",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN" }, "1": { "text": "UP" } } }
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Cache Hit Ratio",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(squid_client_http_hits_total[$__rate_interval]) / rate(squid_client_http_requests_total[$__rate_interval]) * 100",
+          "legendFormat": "Hit Ratio",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "yellow", "value": null },
+              { "color": "orange", "value": 25 },
+              { "color": "green", "value": 50 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Request Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(squid_client_http_requests_total[$__rate_interval])",
+          "legendFormat": "Total",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(squid_client_http_hits_total[$__rate_interval])",
+          "legendFormat": "Hits",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": { "mode": "palette-classic" },
+          "custom": { "showPoints": "never" }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Bandwidth (Outgoing)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(squid_client_http_kbytes_out_kbytes_total[$__rate_interval]) * 1024",
+          "legendFormat": "Sent",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(squid_client_http_hit_kbytes_out_bytes_total[$__rate_interval])",
+          "legendFormat": "From Cache",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "color": { "mode": "palette-classic" },
+          "custom": { "showPoints": "never" }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Client Errors",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(squid_client_http_errors_total[$__rate_interval])",
+          "legendFormat": "Errors",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "color": { "mode": "palette-classic" },
+          "custom": { "showPoints": "never" }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Server Requests vs Errors",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(squid_server_all_requests_total[$__rate_interval])",
+          "legendFormat": "Requests",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(squid_server_all_errors_total[$__rate_interval])",
+          "legendFormat": "Errors",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "color": { "mode": "palette-classic" },
+          "custom": { "showPoints": "never" }
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Swap (Disk Cache) Operations",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(squid_swap_ins_total[$__rate_interval])",
+          "legendFormat": "Objects In",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(squid_swap_outs_total[$__rate_interval])",
+          "legendFormat": "Objects Out",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "color": { "mode": "palette-classic" },
+          "custom": { "showPoints": "never" }
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Service Time Percentiles – Cache Hits",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "squid_Cache_Hits_50",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "squid_Cache_Hits_90",
+          "legendFormat": "p90",
+          "refId": "B"
+        },
+        {
+          "expr": "squid_Cache_Hits_95",
+          "legendFormat": "p95",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "palette-classic" },
+          "custom": { "showPoints": "never" }
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Service Time Percentiles – Cache Misses",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "squid_Cache_Misses_50",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "squid_Cache_Misses_90",
+          "legendFormat": "p90",
+          "refId": "B"
+        },
+        {
+          "expr": "squid_Cache_Misses_95",
+          "legendFormat": "p95",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "palette-classic" },
+          "custom": { "showPoints": "never" }
+        }
+      }
+    }
+  ],
+  "templating": { "list": [] },
+  "annotations": { "list": [] }
+}

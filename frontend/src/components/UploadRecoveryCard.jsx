@@ -8,7 +8,7 @@ import {
   X, ShieldCheck, Database, FolderOpen, Globe, Lock, Settings,
   ShieldAlert, FileArchive, ArrowRight,
 } from 'lucide-react';
-import api from '../utils/api';
+import api, { getAccessToken } from '../utils/api';
 
 const SECTION_ICONS = {
   files:    Globe,
@@ -64,7 +64,7 @@ export default function UploadRecoveryCard({ domain, onClose }) {
     setPhase('uploading');
     setUploadPct(0);
 
-    const token = localStorage.getItem('access_token') || '';
+    const token = getAccessToken() || '';
     const xhr   = new XMLHttpRequest();
     xhr.open('POST', `/api/container/${domain}/site-backup/upload`);
     xhr.setRequestHeader('Authorization', `Bearer ${token}`);

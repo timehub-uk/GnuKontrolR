@@ -32,7 +32,6 @@ export default function SslPage() {
   };
 
   const handleDownload = (filetype) => {
-    const token = localStorage.getItem('access_token') || '';
     window.open(`/api/container/${domain}/ssl/download/${filetype}`, '_blank');
   };
 

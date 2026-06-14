@@ -22,11 +22,14 @@ import os
 import json
 import time
 import shutil
+import subprocess
 import threading
 import urllib.request
+import uuid
+import logging
 from pathlib import Path
 
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import select, delete
 from app.auth import get_current_user, require_admin
 from app.database import get_db as get_db_dep, AsyncSession
@@ -37,9 +40,42 @@ import httpx
 from app.http_client import panel_client
 from app.notify import push as notify_push
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/marketplace", tags=["marketplace"])
 
 TIMEOUT = httpx.Timeout(connect=5, read=300, write=30, pool=5)  # long read for downloads
+
+# ── /etc/hosts helper ──────────────────────────────────────────────────────────
+_HOSTS_SCRIPT = "/usr/local/bin/update-hosts.sh"
+
+def _hosts_add(hostname: str) -> None:
+    """Add *hostname* → SERVER_IP to /etc/hosts (via sudo helper script)."""
+    ip = os.getenv("SERVER_IP", "")
+    if not ip:
+        log.warning("SERVER_IP not set — skipping /etc/hosts entry for %s", hostname)
+        return
+    try:
+        subprocess.run(
+            ["sudo", _HOSTS_SCRIPT, "add", ip, hostname],
+            capture_output=True, timeout=10, check=True,
+        )
+        log.info("Hosts entry added: %s → %s", hostname, ip)
+    except Exception as exc:
+        log.warning("Failed to add /etc/hosts entry %s: %s", hostname, exc)
+
+
+def _hosts_remove(hostname: str) -> None:
+    """Remove *hostname* from /etc/hosts (via sudo helper script)."""
+    try:
+        subprocess.run(
+            ["sudo", _HOSTS_SCRIPT, "remove", hostname],
+            capture_output=True, timeout=10, check=True,
+        )
+        log.info("Hosts entry removed: %s", hostname)
+    except Exception as exc:
+        log.warning("Failed to remove /etc/hosts entry %s: %s", hostname, exc)
+
 
 # ── App catalogue (source of truth on the panel side) ─────────────────────────
 
@@ -106,14 +142,14 @@ APP_CATALOG = {
     # ── CMS (additional) ──────────────────────────────────────────────────────
     "ghost": {
         "id": "ghost", "category": "cms",
-        "name": "Ghost", "version": "5.x (latest)",
+        "name": "Ghost", "version": "6.x (latest)",
         "description": "Modern Node.js blog and publication platform. Beautiful editor, native SEO, newsletter and membership features built in.",
         "disk": "~120 MB", "language": "Node.js",
         "requires_db": False, "color": "from-gray-600/25 to-gray-900/10 border-gray-700/40",
     },
     "october": {
         "id": "october", "category": "cms",
-        "name": "October CMS", "version": "3.x (latest)",
+        "name": "October CMS", "version": "4.x (latest)",
         "description": "Elegant PHP CMS with a rich plugin ecosystem. Combines the simplicity of a flat-file structure with the power of a full database backend.",
         "disk": "~45 MB", "language": "PHP",
         "requires_db": True, "color": "from-teal-600/25 to-teal-900/10 border-teal-700/40",
@@ -229,7 +265,7 @@ APP_CATALOG = {
     },
     "vaultwarden": {
         "id": "vaultwarden", "category": "utilities",
-        "name": "Vaultwarden", "version": "1.30.x (latest)",
+        "name": "Vaultwarden", "version": "1.36.x (latest)",
         "description": "Lightweight Bitwarden-compatible server written in Rust. Self-hosted password manager with browser extension and mobile app support.",
         "disk": "~20 MB", "language": "Rust",
         "requires_db": False, "color": "from-blue-700/25 to-blue-900/10 border-blue-800/40",
@@ -462,8 +498,13 @@ async def start_install(req: InstallRequest, user=Depends(get_current_user), db:
             data = r.json()
             # Register a virtual subdomain in PowerDNS so the service is
             # accessible as {app_id}.{domain} from outside the server.
-            vdns_host = await register_vdns(req.domain, req.app_id)
+            # Use a short UUID as the subdomain prefix for uniqueness.
+            vdns_id  = uuid.uuid4().hex[:8]
+            vdns_host = await register_vdns(req.domain, f"{vdns_id}.{req.app_id}")
             vdns_url  = f"https://{vdns_host}"
+
+            # Add an /etc/hosts entry so the local machine can resolve the vdns
+            _hosts_add(vdns_host)
 
             # Persist installation record to DB (upsert: remove old, insert new)
             try:
@@ -551,8 +592,13 @@ async def remove_app(domain: str, app_id: str, _user=Depends(get_current_user), 
     row = result.scalar_one_or_none()
     if row:
         row.status = "removed"
-        row.updated_at = datetime.utcnow()
+        row.updated_at = datetime.now(timezone.utc)
         await db.commit()
+        # Remove the /etc/hosts entry for this vdns (if vdns URL is stored)
+        if row.vdns:
+            # row.vdns looks like "https://a1b2c3d4.wordpress.example.com"
+            hostname = row.vdns.replace("https://", "").replace("http://", "").split("/")[0]
+            _hosts_remove(hostname)
     return {"ok": True}
 
 
@@ -960,26 +1006,44 @@ APP_CACHE_KEEP_VERSIONS = 3   # keep this many old versions per app
 # Mirrors APP_DOWNLOADS in container_api.py — this is the panel-side copy.
 _APP_DOWNLOADS = {
     "wordpress":   ("https://wordpress.org/latest.tar.gz",                                                "wordpress.tar.gz"),
-    "joomla":      ("https://downloads.joomla.org/cms/joomla5/latest/Joomla_latest-Stable-Full_Package.tar.gz", "joomla.tar.gz"),
+    "joomla":      ("https://github.com/joomla/joomla-cms/releases/download/6.1.1/Joomla_6.1.1-Stable-Full_Package.tar.gz", "joomla.tar.gz"),
+    "concrete":    ("https://github.com/concretecms/concretecms/releases/download/9.5.2/concrete-cms-9.5.2.zip", "concrete.zip"),
     "drupal":      ("https://www.drupal.org/download-latest/tar.gz",                                       "drupal.tar.gz"),
     "grav":        ("https://getgrav.org/download/core/grav/latest",                                       "grav.zip"),
     "roundcube":   ("https://github.com/roundcube/roundcubemail/releases/download/1.6.9/roundcubemail-1.6.9-complete.tar.gz", "roundcube.tar.gz"),
     "snappymail":  ("https://github.com/the-djmaze/snappymail/releases/download/v2.38.2/snappymail-2.38.2.tar.gz", "snappymail.tar.gz"),
     "phpmyadmin":  ("https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz",  "phpmyadmin.tar.gz"),
     "adminer":     ("https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php",         "adminer.php"),
-    "ghost":       ("https://github.com/TryGhost/Ghost/releases/download/v5.82.2/Ghost-5.82.2.zip",        "ghost.zip"),
-    "october":     ("https://github.com/octobercms/october/archive/refs/tags/v3.5.30.tar.gz",              "october.tar.gz"),
+    "ghost":       ("https://registry.npmjs.org/ghost/-/ghost-6.45.0.tgz",                                 "ghost.tgz"),
+    "october":     ("https://github.com/octobercms/october/archive/refs/tags/v4.2.0.tar.gz",              "october.tar.gz"),
     "matomo":      ("https://builds.matomo.org/matomo-5.0.3.zip",                                          "matomo.zip"),
     "nextcloud":   ("https://download.nextcloud.com/server/releases/nextcloud-28.0.3.tar.bz2",             "nextcloud.tar.bz2"),
     "bookstack":   ("https://github.com/BookStackApp/BookStack/archive/refs/tags/v23.12.2.tar.gz",         "bookstack.tar.gz"),
     "freshrss":    ("https://github.com/FreshRSS/FreshRSS/archive/refs/tags/1.24.1.tar.gz",               "freshrss.tar.gz"),
     "wikijs":      ("https://github.com/requarks/wiki/releases/download/v2.5.303/wiki-js.tar.gz",          "wikijs.tar.gz"),
     "gitea":       ("https://dl.gitea.com/gitea/1.21.11/gitea-1.21.11-linux-amd64",                       "gitea-bin"),
-    "vaultwarden": ("https://github.com/dani-garcia/vaultwarden/releases/download/1.30.5/vaultwarden-1.30.5-linux-amd64.tar.gz", "vaultwarden.tar.gz"),
+    "vaultwarden": ("https://github.com/1f349/vaultwarden-binary/releases/download/1.36.0/vaultwarden-linux-amd64.tar.gz", "vaultwarden.tar.gz"),
     "piwigo":      ("https://piwigo.org/download/dlcounter.php?code=latest",                               "piwigo.zip"),
     "moodle":      ("https://download.moodle.org/download.php/direct/stable404/moodle-latest-404.tgz",    "moodle.tgz"),
     "prestashop":  ("https://github.com/PrestaShop/PrestaShop/releases/download/8.1.7/prestashop_8.1.7.zip", "prestashop.zip"),
-    "opencart":    ("https://github.com/opencart/opencart/releases/download/4.0.2.3/opencart-4.0.2.3.tar.gz", "opencart.tar.gz"),
+    "opencart":    ("https://github.com/opencart/opencart/releases/download/3.0.5.0/opencart-3.0.5.0.zip", "opencart.zip"),
+    # ── Added to mirror container_api.py (16 apps) ──────────────────────────────
+    "typo3":        ("https://get.typo3.org/12/tar.gz",                                                                                              "typo3.tar.gz"),
+    "strapi":       ("https://registry.npmjs.org/create-strapi-app/-/create-strapi-app-4.25.4.tgz",                                                   "strapi.tgz"),
+    "umami":        ("https://github.com/umami-software/umami/archive/refs/tags/v2.10.2.tar.gz",                                                      "umami.tar.gz"),
+    "codeserver":   ("https://github.com/coder/code-server/releases/download/v4.22.1/code-server-4.22.1-linux-amd64.tar.gz",                         "codeserver.tar.gz"),
+    "n8n":          ("https://registry.npmjs.org/n8n/-/n8n-1.36.4.tgz",                                                                              "n8n.tgz"),
+    "nodered":      ("https://registry.npmjs.org/node-red/-/node-red-4.1.11.tgz",                                                                    "nodered.tgz"),
+    "filebrowser":  ("https://github.com/filebrowser/filebrowser/releases/download/v2.27.0/linux-amd64-filebrowser.tar.gz",                          "filebrowser.tar.gz"),
+    "uptime":       ("https://github.com/louislam/uptime-kuma/archive/refs/tags/1.23.11.tar.gz",                                                      "uptime-kuma.tar.gz"),
+    "invoiceninja": ("https://github.com/invoiceninja/invoiceninja/releases/download/v5.8.40/invoiceninja.zip",                                       "invoiceninja.zip"),
+    "woocommerce":  ("https://wordpress.org/latest.tar.gz",                                                                                           "wordpress-woo.tar.gz"),
+    "lychee":       ("https://github.com/LycheeOrg/Lychee/releases/download/v5.5.1/Lychee.zip",                                                       "lychee.zip"),
+    "jellyfin":     ("https://repo.jellyfin.org/files/server/linux/stable/v10.11.11/amd64/jellyfin_10.11.11-amd64.tar.gz",                           "jellyfin.tar.gz"),
+    "monica":       ("https://github.com/monicahq/monica/releases/download/v4.1.2/monica-v4.1.2.tar.bz2",                                             "monica.tar.bz2"),
+    "yourls":       ("https://github.com/YOURLS/YOURLS/archive/refs/tags/1.10.4.zip",                                                                "yourls.zip"),
+    "grafana":      ("https://dl.grafana.com/oss/release/grafana-10.4.2.linux-amd64.tar.gz",                                                          "grafana.tar.gz"),
+    "netdata":      ("https://github.com/netdata/netdata/releases/download/v1.45.0/netdata-v1.45.0.tar.gz",                                           "netdata.tar.gz"),
 }
 
 _cache_lock = threading.Lock()
@@ -1036,7 +1100,7 @@ def _db_record_cached(app_id: str, url: str, canonical: str, versioned: str, siz
     from app.database import DB_PATH
 
     engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     with Session(engine) as s:
         # Mark previous canonical as non-canonical
         s.query(AppCacheEntry).filter_by(app_id=app_id, is_canonical=True).update({"is_canonical": False})

@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect } from 'react';
 import { toast } from 'sonner';
-import api from '../utils/api';
+import api, { setAccessToken, clearAccessToken, getAccessToken } from '../utils/api';
 
 const AuthContext = createContext(null);
 
@@ -8,25 +8,38 @@ export function AuthProvider({ children }) {
   const [user, setUser]     = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // On mount: try to restore session via httpOnly cookie
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (token) {
-      api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    const existingToken = getAccessToken();
+    if (existingToken) {
+      // Token already in memory — verify it
+      setLoading(true);
       api.get('/api/auth/me')
         .then(r => setUser(r.data))
-        .catch(() => logout())
+        .catch(() => { clearAccessToken(); setUser(null); })
         .finally(() => setLoading(false));
     } else {
-      setLoading(false);
+      // No in-memory token — try httpOnly cookie session recovery
+      api.get('/api/auth/session')
+        .then(r => {
+          if (r.data.access_token) {
+            setAccessToken(r.data.access_token);
+            setUser({ id: r.data.id, username: r.data.username, role: r.data.role, email: r.data.email });
+          }
+        })
+        .catch(() => { /* No session — user is logged out */ })
+        .finally(() => setLoading(false));
     }
   }, []);
 
   const login = async (username, password) => {
     const form = new URLSearchParams({ username, password });
     const { data } = await api.post('/api/auth/token', form);
-    localStorage.setItem('access_token', data.access_token);
-    localStorage.setItem('refresh_token', data.refresh_token);
-    api.defaults.headers.common['Authorization'] = `Bearer ${data.access_token}`;
+
+    // Store access token in memory only (XSS-safe)
+    setAccessToken(data.access_token);
+
+    // Fetch full user profile
     const me = await api.get('/api/auth/me');
     setUser(me.data);
     return me.data;
@@ -39,11 +52,11 @@ export function AuthProvider({ children }) {
     } catch { /* non-fatal */ }
   };
 
-  const logout = () => {
-    api.post('/api/auth/logout').catch(() => {});
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
-    delete api.defaults.headers.common['Authorization'];
+  const logout = async () => {
+    try {
+      await api.post('/api/auth/logout');
+    } catch { /* server logout is best-effort */ }
+    clearAccessToken();
     setUser(null);
   };
 

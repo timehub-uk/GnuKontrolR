@@ -14,7 +14,6 @@ from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from pathlib import Path
 from prometheus_client import (
     Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST,
-    CollectorRegistry, multiprocess
 )
 import psutil
 
@@ -36,6 +35,15 @@ if _DEBUG_LEVEL >= 5:
     logging.getLogger().setLevel(logging.DEBUG)
     logging.getLogger().addHandler(_comp_handler)
     log.info("DEBUG_LEVEL=5: comprehensive logging active → /tmp/comprehensive.log")
+else:
+    # Default: ensure webpanel logger outputs INFO+ to stderr
+    _handler = logging.StreamHandler()
+    _handler.setLevel(logging.INFO)
+    _handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s  %(message)s"
+    ))
+    logging.getLogger("webpanel").setLevel(logging.INFO)
+    logging.getLogger("webpanel").addHandler(_handler)
 # ─────────────────────────────────────────────────────────────────────────────
 
 from app.database import init_db
@@ -200,6 +208,22 @@ app.add_middleware(
 
 
 @app.middleware("http")
+async def _request_body_size_limit(request: Request, call_next):
+    """Reject API requests with body larger than MAX_REQUEST_BODY_SIZE (default 10MB)."""
+    MAX_BODY = int(os.environ.get("MAX_REQUEST_BODY_SIZE", str(10 * 1024 * 1024)))
+    if request.method in ("POST", "PUT", "PATCH") and request.url.path.startswith("/api/"):
+        content_length = request.headers.get("content-length")
+        if content_length and content_length.isdigit():
+            if int(content_length) > MAX_BODY:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": f"Request body too large. Maximum size is {MAX_BODY // (1024*1024)}MB."},
+                )
+    response = await call_next(request)
+    return response
+
+
+@app.middleware("http")
 async def _request_lifecycle(request: Request, call_next):
     """
     Per-request lifecycle middleware:
@@ -234,10 +258,12 @@ async def _request_lifecycle(request: Request, call_next):
     response.headers["Cross-Origin-Opener-Policy"]     = "same-origin"
     response.headers["Cross-Origin-Resource-Policy"]   = "same-site"
     response.headers["Cross-Origin-Embedder-Policy"]   = "require-corp"
-    # CSP — allow self + inline styles (Tailwind/framer-motion) + data: images
+    # CSP — strict policy: no unsafe-inline for scripts (bundled JS only),
+    # inline styles allowed for Tailwind/framer-motion, data URIs for images/fonts
+    is_dev = not _IS_PRODUCTION
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
+        f"script-src 'self'{' \'unsafe-inline\'' if is_dev else ''}; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: https:; "
         "font-src 'self' data:; "
@@ -286,42 +312,59 @@ async def _request_lifecycle(request: Request, call_next):
     return response
 
 @app.middleware("http")
+async def _csrf_protection(request: Request, call_next):
+    """Lightweight CSRF protection for state-changing API requests.
+
+    Requires X-Requested-With header on all POST/PUT/PATCH/DELETE requests
+    to the API. This header is set automatically by fetch/XHR but cannot be
+    added by simple HTML forms, preventing CSRF attacks.
+    """
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.url.path.startswith("/api/"):
+        # Allow auth endpoints (login/register/MFA don't need CSRF)
+        if not any(request.url.path.startswith(p) for p in ("/api/auth/token", "/api/auth/mfa-verify", "/api/auth/register")):
+            x_requested_with = request.headers.get("X-Requested-With", "")
+            if x_requested_with.lower() != "xmlhttprequest":
+                log.warning("CSRF check failed for %s %s (missing X-Requested-With)", request.method, request.url.path)
+                # Check if Authorization header is present as fallback proof of intent
+                auth = request.headers.get("Authorization", "")
+                if not auth.startswith("Bearer "):
+                    return JSONResponse(status_code=403, content={"detail": "CSRF check failed"})
+    response = await call_next(request)
+    return response
+
+
+@app.middleware("http")
 async def _session_idle_timeout(request: Request, call_next):
     """Enforce session idle timeout for authenticated API requests.
-    
-    If a user's session (JWT) is older than SESSION_IDLE_MINUTES, they are
-    logged out. This prevents stale sessions from remaining active.
+
+    If the JWT was issued (iat) more than SESSION_IDLE_MINUTES ago, the
+    request is rejected with 401. This prevents stale sessions from remaining
+    active beyond the configured idle window.
     Default idle timeout: 60 minutes (configurable via SESSION_IDLE_MINUTES env).
     """
-    _SESSION_IDLE_MINUTES = int(os.environ.get("SESSION_IDLE_MINUTES", "60"))
-    
-    # Only check API routes (not static files, metrics, or SPA)
-    if request.url.path.startswith("/api/") and request.url.path != "/api/metrics" and request.url.path != "/api/auth/token" and request.url.path != "/api/auth/mfa-verify" and request.url.path != "/api/auth/register":
-        try:
-            token = (request.headers.get("Authorization", "") or "").removeprefix("Bearer ").strip()
-            if token:
-                from app.auth import _decode_token as _dt
-                user_id = _dt(token) if token else None
-                if user_id:
-                    # Check if the token was issued too long ago
-                    from jose import jwt as _jwt
-                    from app.auth import SECRET_KEY, ALGORITHM
-                    try:
-                        payload = _jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-                        exp = payload.get("exp", 0)
-                        import time as _time
-                        now = _time.time()
-                        # If the token was issued more than SESSION_IDLE_MINUTES ago,
-                        # and the session has been idle, invalidate it
-                        # We rely on JWT expiry for actual enforcement; this is a soft check
-                        if exp and (exp - now) < 60:
-                            # Token is about to expire, let it pass and expire naturally
-                            pass
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-    
+    _SESSION_IDLE_SECONDS = int(os.environ.get("SESSION_IDLE_MINUTES", "60")) * 60
+
+    # Only check API routes (not static files, metrics, auth/login endpoints)
+    exempt_paths = ("/api/metrics", "/api/auth/token", "/api/auth/mfa-verify", "/api/auth/register")
+    if request.url.path.startswith("/api/") and not request.url.path.startswith(exempt_paths):
+        auth_header = request.headers.get("Authorization", "") or ""
+        token = auth_header.removeprefix("Bearer ").strip()
+        if token:
+            try:
+                from jose import jwt as _jwt
+                from app.auth import SECRET_KEY, ALGORITHM
+                payload = _jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+                now = __import__("time").time()
+                iat = payload.get("iat", 0)
+                if iat and (now - iat) > _SESSION_IDLE_SECONDS:
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "Session expired due to inactivity. Please log in again."},
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            except Exception:
+                pass  # Let the endpoint's auth dependency handle invalid tokens
+
     response = await call_next(request)
     return response
 
@@ -360,6 +403,12 @@ app.include_router(compliance.router)
 app.include_router(mfa.router)
 app.include_router(data_retention.router)
 app.include_router(secondary_services.router)
+
+
+@app.get("/health", include_in_schema=False)
+async def health():
+    """Health check endpoint used by Docker HEALTHCHECK."""
+    return {"status": "ok", "version": "1.0.0"}
 
 
 @app.get("/api/metrics", include_in_schema=False)

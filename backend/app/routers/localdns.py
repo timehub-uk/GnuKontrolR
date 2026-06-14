@@ -95,6 +95,16 @@ def _reload_dnsmasq() -> bool:
         return False
 
 
+async def _localdns_sync_bg() -> dict:
+    """Background-task-safe version: creates its own DB session.
+
+    Use in asyncio.create_task() calls — never pass the request's session.
+    """
+    from app.database import AsyncSessionLocal as _AsyncSessionLocal
+    async with _AsyncSessionLocal() as _db:
+        return await _localdns_sync(_db)
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/hosts")

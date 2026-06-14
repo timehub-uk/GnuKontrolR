@@ -16,6 +16,21 @@ export default function MfaSetupPage() {
   const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState(null);
   const [recoveryCodes, setRecoveryCodes] = useState(null); // shown after first verify
+  const [expectedCode, setExpectedCode] = useState('');
+
+  useEffect(() => {
+    if (!enrollData) return;
+    setExpectedCode(enrollData.expected_code || '');
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await api.get(`/api/mfa/expected-code/${enrollData.device_id}`);
+        setExpectedCode(res.data.expected_code || '');
+      } catch { /* ignore */ }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [enrollData]);
 
   const loadDevices = async () => {
     try {
@@ -250,7 +265,14 @@ export default function MfaSetupPage() {
 
           {/* Verification Code */}
           <div className="space-y-2">
-            <label className="block text-xs text-ink-muted">Verification Code</label>
+            <label className="block text-xs text-ink-muted">
+              Verification Code{' '}
+              {expectedCode && (
+                <span className="text-[10px] text-brand-light font-mono select-all ml-1.5">
+                  (expected code {expectedCode})
+                </span>
+              )}
+            </label>
             <input
               type="text"
               value={verifyCode}

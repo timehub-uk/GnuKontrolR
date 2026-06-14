@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Media Dump & Conversion Service</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(17, 24, 39, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-color: #f3f4f6;
+            --text-muted: #9ca3af;
+            --primary: #8b5cf6;
+            --primary-glow: rgba(139, 92, 246, 0.15);
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Outfit', sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(139, 92, 246, 0.1) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.05) 0px, transparent 50%);
+            color: var(--text-color);
+            min-height: 100vh;
+            padding: 2rem;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 900px;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 1.5rem;
+        }
+
+        h1 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #fff 30%, var(--primary) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .subtitle {
+            font-size: 1rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+
+        .upload-section {
+            background: var(--card-bg);
+            border: 2px dashed rgba(139, 92, 246, 0.3);
+            border-radius: 20px;
+            padding: 3rem;
+            text-align: center;
+            cursor: pointer;
+            transition: var(--transition);
+            backdrop-filter: blur(12px);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .upload-section:hover, .upload-section.dragover {
+            border-color: var(--primary);
+            background: rgba(139, 92, 246, 0.03);
+            box-shadow: 0 0 30px var(--primary-glow);
+        }
+
+        .upload-icon {
+            font-size: 3.5rem;
+            margin-bottom: 1rem;
+            display: inline-block;
+            transition: var(--transition);
+        }
+
+        .upload-section:hover .upload-icon {
+            transform: translateY(-5px);
+        }
+
+        .upload-btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.75rem 2rem;
+            font-size: 1rem;
+            font-weight: 500;
+            border-radius: 12px;
+            cursor: pointer;
+            margin-top: 1rem;
+            transition: var(--transition);
+            box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+        }
+
+        .upload-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(139, 92, 246, 0.5);
+        }
+
+        #file-input {
+            display: none;
+        }
+
+        .jobs-section {
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+
+        h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .job-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            backdrop-filter: blur(12px);
+            transition: var(--transition);
+        }
+
+        .job-card:hover {
+            border-color: rgba(255, 255, 255, 0.15);
+            transform: translateY(-2px);
+        }
+
+        .job-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .job-title {
+            font-weight: 600;
+            font-size: 1.1rem;
+            word-break: break-all;
+            max-width: 70%;
+        }
+
+        .job-badge {
+            padding: 0.35rem 0.85rem;
+            font-size: 0.8rem;
+            font-weight: 600;
+            border-radius: 100px;
+            text-transform: uppercase;
+        }
+
+        .badge-pending { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
+        .badge-converting { background: rgba(139, 92, 246, 0.15); color: var(--primary); }
+        .badge-completed { background: rgba(16, 185, 129, 0.15); color: var(--success); }
+        .badge-failed { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+
+        .job-meta {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            display: flex;
+            gap: 1.5rem;
+        }
+
+        .job-progress-container {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 100px;
+            overflow: hidden;
+        }
+
+        .job-progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary), #a78bfa);
+            width: 0%;
+            transition: width 0.4s ease;
+        }
+
+        .downloads-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 0.75rem;
+            margin-top: 0.5rem;
+        }
+
+        .download-btn {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            padding: 0.75rem 1rem;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            color: var(--text-color);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: var(--transition);
+        }
+
+        .download-btn:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: var(--primary);
+            color: white;
+        }
+
+        .download-btn span {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-muted);
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+        }
+
+        .file-list {
+            margin-top: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1>📁 Media Dump Service</h1>
+                <div class="subtitle">Secure high-speed video scaling and audio compression docker stack</div>
+            </div>
+        </header>
+
+        <div class="upload-section" id="drop-zone" onclick="document.getElementById('file-input').click()">
+            <span class="upload-icon">⚡</span>
+            <h3>Drag & Drop media file here</h3>
+            <p style="color: var(--text-muted); margin-top: 0.5rem;">Splits files into 10 pieces with CRC verification. Supports major media formats.</p>
+            <button class="upload-btn">Browse File</button>
+            <input type="file" id="file-input" onchange="handleFileSelect(this.files)">
+        </div>
+
+        <div class="jobs-section">
+            <h2>Activity Logs & Conversions</h2>
+            <div id="jobs-container">
+                <div class="empty-state">No conversions triggered yet. Upload a file above to begin.</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('drop-zone');
+
+        // Drag and drop handlers
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, e => {
+                e.preventDefault();
+                dropZone.classList.add('dragover');
+            }, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, e => {
+                e.preventDefault();
+                dropZone.classList.remove('dragover');
+            }, false);
+        });
+
+        dropZone.addEventListener('drop', e => {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        function handleFileSelect(files) {
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        }
+
+        // CRC-64 ECMA-182 table & function using BigInt
+        const POLY_64 = 0x42F0E1EBA9EA3693n;
+        const crc64Table = new BigUint64Array(256);
+        for (let i = 0; i < 256; i++) {
+            let crc = BigInt(i);
+            for (let j = 0; j < 8; j++) {
+                if (crc & 1n) {
+                    crc = (crc >> 1n) ^ POLY_64;
+                } else {
+                    crc >>= 1n;
+                }
+            }
+            crc64Table[i] = crc;
+        }
+
+        function crc64(buffer) {
+            let crc = 0xFFFFFFFFFFFFFFFFn;
+            const view = new Uint8Array(buffer);
+            for (let i = 0; i < view.length; i++) {
+                const index = Number((crc ^ BigInt(view[i])) & 0xFFn);
+                crc = (crc >> 8n) ^ crc64Table[index];
+            }
+            return crc ^ 0xFFFFFFFFFFFFFFFFn;
+        }
+
+        async function handleFile(file) {
+            if (!file) return;
+
+            // Split into 10 pieces for large files (> 10MB), otherwise upload in 1 piece
+            const threshold = 10 * 1024 * 1024; // 10MB
+            const totalChunks = file.size > threshold ? 10 : 1;
+            const chunkSize = Math.ceil(file.size / totalChunks);
+            const jobId = crypto.randomUUID();
+            
+            dropZone.querySelector('h3').textContent = `Splitting and verifying file integrity...`;
+            
+            // Loop through all 10 chunks sequentially
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * chunkSize;
+                const end = Math.min(start + chunkSize, file.size);
+                const chunkSlice = file.slice(start, end);
+                
+                // Read slice as ArrayBuffer to compute CRC
+                const buffer = await chunkSlice.arrayBuffer();
+                const crcValue = crc64(buffer);
+                
+                // Construct Form Data
+                const formData = new FormData();
+                formData.append('job_id', jobId);
+                formData.append('chunk_index', i);
+                formData.append('total_chunks', totalChunks);
+                formData.append('crc', crcValue.toString());
+                formData.append('filename', file.name);
+                formData.append('file', chunkSlice);
+                
+                let success = false;
+                let attempts = 0;
+                const maxAttempts = 5;
+
+                while (!success && attempts < maxAttempts) {
+                    dropZone.querySelector('h3').textContent = `Uploading chunk ${i + 1}/${totalChunks}${attempts > 0 ? ` (Attempt ${attempts + 1}/${maxAttempts})` : ''}...`;
+                    try {
+                        const res = await fetch('/upload/chunk', {
+                            method: 'POST',
+                            body: formData
+                        });
+                        if (!res.ok) {
+                            const errorData = await res.json();
+                            throw new Error(errorData.error || `Failed uploading chunk ${i}`);
+                        }
+                        success = true;
+                    } catch (err) {
+                        attempts++;
+                        console.warn(`Attempt ${attempts} failed for chunk ${i}: ${err.message}`);
+                        if (attempts >= maxAttempts) {
+                            console.error(err);
+                            alert(`Upload failed after ${maxAttempts} attempts: ${err.message}`);
+                            dropZone.querySelector('h3').textContent = 'Drag & Drop media file here';
+                            return;
+                        }
+                        // Sleep for 500ms before retrying
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    }
+                }
+            }
+            
+            dropZone.querySelector('h3').textContent = 'Drag & Drop media file here';
+            fetchJobs();
+        }
+
+        function getProgressPercent(progressText, state) {
+            if (state === 'completed') return 100;
+            if (state === 'failed') return 100;
+            if (progressText.includes('720p')) return 20;
+            if (progressText.includes('1080p')) return 40;
+            if (progressText.includes('48k')) return 60;
+            if (progressText.includes('96k')) return 80;
+            if (progressText.includes('128k')) return 90;
+            return 5;
+        }
+
+        function fetchJobs() {
+            fetch('/jobs')
+            .then(res => res.json())
+            .then(data => {
+                const container = document.getElementById('jobs-container');
+                const keys = Object.keys(data).sort((a, b) => {
+                    return new Date(data[b].timestamp) - new Date(data[a].timestamp);
+                });
+
+                if (keys.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No conversions triggered yet. Upload a file above to begin.</div>';
+                    return;
+                }
+
+                let html = '';
+                keys.forEach(key => {
+                    const job = data[key];
+                    const pct = getProgressPercent(job.progress, job.state);
+                    
+                    let badgeClass = 'badge-pending';
+                    if (job.state === 'converting') badgeClass = 'badge-converting';
+                    if (job.state === 'completed') badgeClass = 'badge-completed';
+                    if (job.state === 'failed') badgeClass = 'badge-failed';
+
+                    html += `
+                        <div class="job-card">
+                            <div class="job-header">
+                                <div class="job-title">${job.filename}</div>
+                                <span class="job-badge ${badgeClass}">${job.state}</span>
+                            </div>
+                            <div class="job-meta">
+                                <div>UUID: <code>${job.id}</code></div>
+                                <div>Time: ${job.timestamp}</div>
+                            </div>
+                            
+                            ${job.state !== 'completed' && job.state !== 'failed' ? `
+                                <div style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: -0.25rem;">
+                                    ${job.progress}
+                                </div>
+                                <div class="job-progress-container">
+                                    <div class="job-progress-bar" style="width: ${pct}%"></div>
+                                </div>
+                            ` : ''}
+
+                            ${job.state === 'failed' ? `
+                                <div style="color: var(--danger); font-size: 0.9rem; background: rgba(239, 68, 68, 0.05); padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.15)">
+                                    ${job.progress}
+                                </div>
+                            ` : ''}
+
+                            ${job.state === 'completed' && job.files && job.files.length > 0 ? `
+                                <div class="downloads-grid">
+                                    ${job.files.map(file => `
+                                        <a href="/download/${job.id}/${file}" class="download-btn" download>
+                                            ${file}
+                                            <span>📥 download</span>
+                                        </a>
+                                    `).join('')}
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                });
+                container.innerHTML = html;
+            })
+            .catch(err => console.error('Error fetching jobs:', err));
+        }
+
+        // Poll every 2 seconds
+        setInterval(fetchJobs, 2000);
+        fetchJobs();
+    </script>
+</body>
+</html>

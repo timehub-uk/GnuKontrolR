@@ -1,6 +1,10 @@
 /**
  * Axios instance for all panel API calls.
  *
+ * Security: Tokens stored in MEMORY only (not localStorage) to prevent
+ * XSS-based token theft. httpOnly cookies handle session persistence
+ * across page reloads via GET /api/auth/session.
+ *
  * Request tracing
  * ───────────────
  * Every request is stamped with a UUID event ID in X-Request-ID.
@@ -17,17 +21,39 @@ function uuidv4() {
   });
 }
 
-const api = axios.create({ baseURL: '/' });
+const api = axios.create({
+  baseURL: '/',
+  withCredentials: true,  // Send httpOnly cookies for session/refresh endpoints
+});
+
+// ── In-memory token (NOT localStorage — XSS-safe) ────────────────────────
+let _accessToken = null;
+
+export function setAccessToken(token) {
+  _accessToken = token;
+  if (token) {
+    api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+  } else {
+    delete api.defaults.headers.common['Authorization'];
+  }
+}
+
+export function getAccessToken() {
+  return _accessToken;
+}
+
+export function clearAccessToken() {
+  setAccessToken(null);
+}
 
 // Track the most recent event ID for error reporting
 api.lastEventId = null;
 
 // ── Outgoing: stamp every request with a fresh UUID event ID ─────────────────
 api.interceptors.request.use(config => {
-  const token   = localStorage.getItem('access_token');
   const eventId = uuidv4();
 
-  if (token) config.headers.Authorization = `Bearer ${token}`;
+  // Bearer token is already set via setAccessToken() on api.defaults.headers
   config.headers['X-Request-ID'] = eventId;
 
   // Stash it so the response interceptor can read it even if the server
@@ -50,9 +76,11 @@ api.interceptors.response.use(
       null;
 
     if (err.response?.status === 401) {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('refresh_token');
-      window.location.href = '/login';
+      clearAccessToken();
+      // Don't redirect on session endpoint — it's expected to return 401
+      if (!err.config?.url?.includes('/api/auth/session')) {
+        window.location.href = '/login';
+      }
     }
     return Promise.reject(err);
   }

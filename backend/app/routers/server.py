@@ -3,11 +3,12 @@ import asyncio
 import json
 import os
 import socket
-import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, FileResponse
+import httpx
 import psutil
 
 from app.auth import require_admin, require_superadmin, get_current_user
@@ -28,6 +29,9 @@ CONTAINER_SERVICES = {
 
 # Thread pool for blocking psutil / subprocess calls
 _pool = ThreadPoolExecutor(max_workers=4)
+
+# Docker API URL for direct HTTP calls
+_DOCKER_API = os.environ.get("DOCKER_API_URL", "http://webpanel_docker_api_proxy:2375")
 
 # Compact OUI → manufacturer table (first 3 MAC bytes, uppercase no-colon)
 _OUI: dict[str, str] = {
@@ -157,29 +161,28 @@ def _collect_interfaces() -> dict:
 
 
 def _container_state(container_name: str) -> str:
-    """Return Docker container state: running → active, exited → inactive, etc."""
+    """Return Docker container state via Docker API."""
     try:
-        r = subprocess.run(
-            ["docker", "inspect", "--format", "{{.State.Status}}", container_name],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode != 0:
-            return "not installed"
-        state = r.stdout.strip()
-        if state == "running":
-            return "active"
-        if state in ("exited", "dead", "removing"):
-            return "inactive"
-        if state == "restarting":
-            return "restarting"
-        return state or "unknown"
+        with httpx.Client(timeout=5, verify=False) as client:
+            resp = client.get(f"{_DOCKER_API}/containers/{container_name}/json")
+            if resp.status_code == 404:
+                return "not installed"
+            resp.raise_for_status()
+            state = resp.json().get("State", {}).get("Status", "")
+            if state == "running":
+                return "active"
+            if state in ("exited", "dead", "removing"):
+                return "inactive"
+            if state == "restarting":
+                return "restarting"
+            return state or "unknown"
     except Exception:
         return "unknown"
 
 
 def _collect_stats() -> dict:
     """Blocking stats collection — runs in thread pool."""
-    cpu  = psutil.cpu_percent(interval=0.5)
+    cpu  = psutil.cpu_percent(interval=None)
     mem  = psutil.virtual_memory()
     disk = psutil.disk_usage("/")
     net  = psutil.net_io_counters()
@@ -230,17 +233,6 @@ def _collect_stats() -> dict:
     }
 
 
-def _check_service(svc: str) -> str:
-    try:
-        r = subprocess.run(
-            ["systemctl", "is-active", svc],
-            capture_output=True, text=True, timeout=3,
-        )
-        return r.stdout.strip()
-    except Exception:
-        return "unknown"
-
-
 @router.get("/stats")
 async def server_stats(_=Depends(get_current_user)):
     # Cache for 3 seconds to absorb rapid dashboard polls
@@ -275,15 +267,14 @@ async def control_service(service: str, action: str, _=Depends(require_admin)):
     if action not in ("start", "stop", "restart"):
         return JSONResponse({"error": "Invalid action"}, status_code=400)
     container = CONTAINER_SERVICES[service]
-    loop = asyncio.get_running_loop()
-    def _run():
-        return subprocess.run(
-            ["docker", action, container],
-            capture_output=True, text=True, timeout=30,
-        )
-    r = await loop.run_in_executor(_pool, _run)
-    if r.returncode != 0:
-        return JSONResponse({"error": r.stderr.strip()}, status_code=500)
+    try:
+        with httpx.Client(timeout=30, verify=False) as client:
+            resp = client.post(f"{_DOCKER_API}/containers/{container}/{action}")
+            if resp.status_code not in (200, 204):
+                return JSONResponse({"error": resp.text[:300]}, status_code=500)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return {"ok": True, "service": service, "action": action}
     from app.cache import cache_delete
     await cache_delete("server:services")
     return {"ok": True, "service": service, "action": action}
@@ -302,18 +293,16 @@ def _tcp_check(host: str, port: int, timeout: float = 2.0) -> tuple[bool, float]
 def _container_uptime(cname: str) -> int | None:
     """Return container uptime in seconds, or None if not available."""
     try:
-        r = subprocess.run(
-            ["docker", "inspect", "--format",
-             "{{.State.StartedAt}}", cname],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode != 0:
-            return None
-        started = r.stdout.strip()
-        from datetime import datetime, timezone
-        # Format: 2025-06-10T12:34:56.123456789Z
-        dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
-        return int((datetime.now(timezone.utc) - dt).total_seconds())
+        with httpx.Client(timeout=5, verify=False) as client:
+            resp = client.get(f"{_DOCKER_API}/containers/{cname}/json")
+            if resp.status_code != 200:
+                return None
+            info = resp.json()
+            started = info.get("State", {}).get("StartedAt", "")
+            if not started:
+                return None
+            dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+            return int((datetime.now(timezone.utc) - dt).total_seconds())
     except Exception:
         return None
 
@@ -338,16 +327,18 @@ def _collect_diagnostic() -> dict:
 
     # Count customer containers on webpanel_net
     try:
-        r = subprocess.run(
-            ["docker", "ps", "-a",
-             "--filter", "network=webpanel_net",
-             "--format", "{{.Status}}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        lines  = [l.strip() for l in r.stdout.splitlines() if l.strip()]
-        cust_total  = len(lines)
-        cust_up     = sum(1 for l in lines if l.startswith("Up"))
-        cust_down   = cust_total - cust_up
+        with httpx.Client(timeout=5, verify=False) as client:
+            resp = client.get(
+                f"{_DOCKER_API}/containers/json",
+                params={"all": "true", "filters": '{"network": ["webpanel_net"]}'},
+            )
+            if resp.status_code == 200:
+                containers = resp.json()
+                cust_total = len(containers)
+                cust_up = sum(1 for c in containers if c.get("State") == "running")
+                cust_down = cust_total - cust_up
+            else:
+                cust_total = cust_up = cust_down = 0
     except Exception:
         cust_total = cust_up = cust_down = 0
 
@@ -469,7 +460,9 @@ def _load_panel_config() -> dict:
 
 def _save_panel_config(cfg: dict) -> None:
     os.makedirs(os.path.dirname(_PANEL_CONFIG_FILE), exist_ok=True)
-    with open(_PANEL_CONFIG_FILE, "w") as f:
+    # L5: Restrict panel config to owner-only read/write
+    fd = os.open(_PANEL_CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(cfg, f, indent=2)
 
 

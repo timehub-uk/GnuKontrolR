@@ -15,7 +15,7 @@ import asyncio
 import hashlib
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -51,7 +51,7 @@ async def record_request(
         status      = status,
         duration_ms = round(duration_ms, 1),
         ip_hash     = ip_hash,
-        created_at  = datetime.utcnow(),
+        created_at  = datetime.now(timezone.utc),
     )
     db.add(entry)
     await db.commit()

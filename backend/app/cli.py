@@ -21,6 +21,12 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+# Clean sys.path to prevent local 'app/secrets.py' from shadowing Python's stdlib 'secrets' module
+sys.path = [p for p in sys.path if not p.endswith("/app/app") and not p.endswith("\\app\\app") and Path(p).name != "app"]
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import textwrap
 from datetime import datetime
 
@@ -93,6 +99,10 @@ async def _get_db():
     from app.database import init_db, AsyncSessionLocal
     await init_db()
     return AsyncSessionLocal
+
+async def _get_sec_blob_model():
+    from app.models.secondary_service_blob import SecondaryServiceBlob
+    return SecondaryServiceBlob
 
 async def _get_user_model():
     from app.models.user import User
@@ -425,15 +435,23 @@ async def cmd_db_status(args):
     print_table(rows, ["Database", "Status"])
 
 def cmd_db_mysql(args):
-    pw = os.environ.get("MYSQL_ROOT_PASSWORD", "")
+    """Open interactive MySQL shell. Uses MYSQL_PWD env var (not -p flag) to avoid
+    exposing the password in the process command line (visible to other users via ps)."""
     host = os.environ.get("MYSQL_HOST", "mysql")
-    cmd = ["mysql", f"-h{host}", "-uroot", f"-p{pw}"]
-    os.execvp("mysql", cmd)
+    pw = os.environ.get("MYSQL_ROOT_PASSWORD", "")
+    env = os.environ.copy()
+    env["MYSQL_PWD"] = pw
+    cmd = ["mysql", f"-h{host}", "-uroot"]
+    os.execvpe("mysql", cmd, env)
 
 def cmd_db_postgres(args):
+    """Open interactive PostgreSQL shell. Uses PGPASSWORD env var to avoid
+    exposing the password in the process command line."""
     pw = os.environ.get("POSTGRES_PASSWORD", "")
-    cmd = ["psql", f"postgresql://webpanel:{pw}@postgres:5432/webpanel"]
-    os.execvp("psql", cmd)
+    env = os.environ.copy()
+    env["PGPASSWORD"] = pw
+    cmd = ["psql", f"postgresql://webpanel@postgres:5432/webpanel"]
+    os.execvpe("psql", cmd, env)
 
 # ── main dispatcher ──────────────────────────────────────────────────────────
 
@@ -481,6 +499,10 @@ def _show_tools_list():
         ("db status",            "Test MySQL, PostgreSQL, Redis connectivity"),
         ("db mysql",             "Open an interactive MySQL shell"),
         ("db postgres",          "Open an interactive PostgreSQL shell"),
+        ("secondary-cache list", "List all cached secondary service images"),
+        ("secondary-cache save", "Pull and cache a service image in DB"),
+        ("secondary-cache delete", "Delete a cached service image from DB"),
+        ("secondary-cache update-all", "Update cache for all secondary services"),
         ("update",               "Pull latest code, rebuild & restart"),
         ("log sources",          "List available log sources"),
         ("log view",             "View a log source (--lines N)"),
@@ -583,7 +605,12 @@ def cmd_shell(args):
         except (FileNotFoundError, PermissionError):
             pass
         if "|" in line or ">" in line or "<" in line:
-            os.system(f"panel {line}")
+            subprocess.run(
+                ["/bin/sh", "-c", f"panel {line}"],
+                stdin=sys.stdin,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+            )
             print()
             continue
         try:
@@ -597,6 +624,244 @@ def cmd_shell(args):
         except Exception as e:
             print(f"Error: {e}")
             print()
+
+
+# ── secondary service caching commands ────────────────────────────────────────
+
+async def cmd_sec_cache_list(args):
+    db = await _get_db()
+    BlobModel = await _get_sec_blob_model()
+    async with db() as session:
+        from sqlalchemy import select
+        result = await session.execute(select(BlobModel).order_by(BlobModel.service_key))
+        blobs = result.scalars().all()
+
+    if not blobs:
+        print("No cached secondary service images found in database.")
+        return
+
+    header("Cached Secondary Service Images")
+    rows = []
+    for b in blobs:
+        size_mb = len(b.blob_data) / (1024 * 1024)
+        updated = b.updated_at.strftime("%Y-%m-%d %H:%M:%S") if b.updated_at else "—"
+        rows.append([b.service_key, b.filename, f"{size_mb:.2f} MB", updated])
+
+    print_table(rows, ["Service Key", "Filename", "Size", "Cached At"])
+
+async def cmd_sec_cache_save(args):
+    key = args.service_key
+    file_path = getattr(args, "file", None)
+    from app.routers.secondary_services import SECONDARY_CATALOGUE
+    entry = SECONDARY_CATALOGUE.get(key)
+    if not entry:
+        print(f"Error: Unknown secondary service '{key}'. Available services in catalogue:")
+        for k in SECONDARY_CATALOGUE.keys():
+            print(f"  - {k}")
+        return
+
+    if file_path:
+        if not os.path.exists(file_path):
+            print(f"Error: File '{file_path}' does not exist.")
+            return
+
+        print(f"Reading local file '{file_path}' for service '{key}'...")
+        try:
+            with open(file_path, "rb") as f:
+                blob_bytes = f.read()
+
+            db = await _get_db()
+            BlobModel = await _get_sec_blob_model()
+            async with db() as session:
+                from sqlalchemy import select
+                result = await session.execute(
+                    select(BlobModel).where(BlobModel.service_key == key)
+                )
+                blob_entry = result.scalar_one_or_none()
+                filename = os.path.basename(file_path)
+                if not blob_entry:
+                    blob_entry = BlobModel(
+                        service_key=key,
+                        filename=filename,
+                        blob_data=blob_bytes,
+                    )
+                    session.add(blob_entry)
+                else:
+                    blob_entry.filename = filename
+                    blob_entry.blob_data = blob_bytes
+                    blob_entry.updated_at = datetime.utcnow()
+                await session.commit()
+
+            size_mb = len(blob_bytes) / (1024 * 1024)
+            print(f"Successfully cached local file '{filename}' for service '{key}' in database ({size_mb:.2f} MB).")
+            return
+        except Exception as e:
+            print(f"Error caching local file: {e}")
+            return
+
+    image_name = entry["docker_image"]
+    print(f"Pulling and caching remote image '{image_name}' for service '{key}'...")
+
+    import httpx
+    from app.docker_client import DOCKER_API_URL
+    temp_path = f"/tmp/{key}_cache.tar"
+
+    try:
+        with httpx.Client(timeout=300, verify=False) as client:
+            # 1. Pull remote image
+            print("Downloading image layers from remote registry...")
+            pull_resp = client.post(
+                f"{DOCKER_API_URL}/images/create",
+                params={"fromImage": image_name},
+                timeout=300,
+            )
+            if pull_resp.status_code not in (200, 201):
+                print(f"Warning: Pull returned status {pull_resp.status_code}. Attempting to use local image...")
+
+            # 2. Export to temporary tarball file
+            print(f"Exporting image layers to temporary file {temp_path}...")
+            with open(temp_path, "wb") as f:
+                with client.stream("GET", f"{DOCKER_API_URL}/images/{image_name}/get", timeout=300) as r:
+                    if r.status_code not in (200, 201):
+                        print(f"Error exporting image: status {r.status_code}")
+                        return
+                    for chunk in r.iter_bytes(chunk_size=8192):
+                        f.write(chunk)
+
+            # Read bytes of temp file
+            print("Saving binary blob to database...")
+            with open(temp_path, "rb") as f:
+                blob_bytes = f.read()
+
+        # Clean up temp file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+        db = await _get_db()
+        BlobModel = await _get_sec_blob_model()
+        async with db() as session:
+            from sqlalchemy import select
+            result = await session.execute(
+                select(BlobModel).where(BlobModel.service_key == key)
+            )
+            blob_entry = result.scalar_one_or_none()
+            if not blob_entry:
+                blob_entry = BlobModel(
+                    service_key=key,
+                    filename=f"{key}_image.tar",
+                    blob_data=blob_bytes,
+                )
+                session.add(blob_entry)
+            else:
+                blob_entry.filename = f"{key}_image.tar"
+                blob_entry.blob_data = blob_bytes
+                blob_entry.updated_at = datetime.utcnow()
+            await session.commit()
+
+        size_mb = len(blob_bytes) / (1024 * 1024)
+        print(f"Successfully cached service '{key}' image in database ({size_mb:.2f} MB).")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+async def cmd_sec_cache_delete(args):
+    key = args.service_key
+    db = await _get_db()
+    BlobModel = await _get_sec_blob_model()
+    async with db() as session:
+        from sqlalchemy import select
+        result = await session.execute(
+            select(BlobModel).where(BlobModel.service_key == key)
+        )
+        blob_entry = result.scalar_one_or_none()
+        if not blob_entry:
+            print(f"No cached image found for secondary service '{key}'.")
+            return
+        await session.delete(blob_entry)
+        await session.commit()
+    print(f"Successfully deleted cached image for service '{key}' from database.")
+
+async def cmd_sec_cache_update_all(args):
+    db = await _get_db()
+    BlobModel = await _get_sec_blob_model()
+    from app.routers.secondary_services import SECONDARY_CATALOGUE
+
+    print("Starting automatic update of all cached secondary service images...")
+
+    import httpx
+    from app.docker_client import DOCKER_API_URL
+
+    for key, entry in SECONDARY_CATALOGUE.items():
+        image_name = entry["docker_image"]
+        print(f"\n[Updating {key}] Pulling remote image '{image_name}'...")
+        temp_path = f"/tmp/{key}_cache.tar"
+
+        try:
+            with httpx.Client(timeout=300, verify=False) as client:
+                # 1. Pull
+                pull_resp = client.post(
+                    f"{DOCKER_API_URL}/images/create",
+                    params={"fromImage": image_name},
+                    timeout=300,
+                )
+                if pull_resp.status_code not in (200, 201):
+                    print(f"  Warning: Failed to pull image {image_name} (status {pull_resp.status_code}). Attempting to export local image...")
+
+                # 2. Export
+                print(f"  Exporting image layers to {temp_path}...")
+                with open(temp_path, "wb") as f:
+                    with client.stream("GET", f"{DOCKER_API_URL}/images/{image_name}/get", timeout=300) as r:
+                        if r.status_code not in (200, 201):
+                            print(f"  Warning: Failed to export image (status {r.status_code})")
+                            continue
+                        for chunk in r.iter_bytes(chunk_size=8192):
+                            f.write(chunk)
+
+                # Read bytes
+                with open(temp_path, "rb") as f:
+                    blob_bytes = f.read()
+
+            # Clean up
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+            # Write/update in DB
+            async with db() as session:
+                from sqlalchemy import select
+                result = await session.execute(
+                    select(BlobModel).where(BlobModel.service_key == key)
+                )
+                blob_entry = result.scalar_one_or_none()
+                if not blob_entry:
+                    blob_entry = BlobModel(
+                        service_key=key,
+                        filename=f"{key}_image.tar",
+                        blob_data=blob_bytes,
+                    )
+                    session.add(blob_entry)
+                else:
+                    blob_entry.filename = f"{key}_image.tar"
+                    blob_entry.blob_data = blob_bytes
+                    blob_entry.updated_at = datetime.utcnow()
+                await session.commit()
+
+            size_mb = len(blob_bytes) / (1024 * 1024)
+            print(f"  Successfully updated database cache for '{key}' ({size_mb:.2f} MB).")
+
+        except Exception as e:
+            print(f"  Error updating '{key}': {e}")
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+    print("\nSecondary services cache update complete.")
 
 
 def _make_parser():
@@ -705,6 +970,25 @@ def _make_parser():
     # ── update ──
     p_update = sub.add_parser("update", help="Pull latest code, rebuild deps & containers, restart")
     p_update.set_defaults(func=lambda a: cmd_update(a))
+
+    # ── secondary-cache ──
+    p_sec_cache = sub.add_parser("secondary-cache", help="Manage cached images for secondary services")
+    p_sec_cache_sub = p_sec_cache.add_subparsers(dest="subcommand")
+
+    p_sec_cache_list = p_sec_cache_sub.add_parser("list", help="List all cached secondary service images")
+    p_sec_cache_list.set_defaults(func=lambda a: asyncio.run(cmd_sec_cache_list(a)))
+
+    p_sec_cache_save = p_sec_cache_sub.add_parser("save", help="Pull and cache a secondary service image in DB")
+    p_sec_cache_save.add_argument("service_key", help="Key of the service (e.g. portainer, minio, mediadump)")
+    p_sec_cache_save.add_argument("--file", "-f", help="Path to a local installer file to cache directly instead of pulling a Docker image")
+    p_sec_cache_save.set_defaults(func=lambda a: asyncio.run(cmd_sec_cache_save(a)))
+
+    p_sec_cache_delete = p_sec_cache_sub.add_parser("delete", help="Delete a cached image from DB")
+    p_sec_cache_delete.add_argument("service_key", help="Key of the service to delete")
+    p_sec_cache_delete.set_defaults(func=lambda a: asyncio.run(cmd_sec_cache_delete(a)))
+
+    p_sec_cache_update_all = p_sec_cache_sub.add_parser("update-all", help="Pull and cache all secondary service images in DB")
+    p_sec_cache_update_all.set_defaults(func=lambda a: asyncio.run(cmd_sec_cache_update_all(a)))
 
     # ── shell ──
     p_shell = sub.add_parser("shell", aliases=["sh", "repl"], help="Interactive shell mode")

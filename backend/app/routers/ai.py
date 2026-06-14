@@ -6,7 +6,6 @@ import logging
 import os
 import re
 import secrets
-import subprocess
 from typing import Optional
 
 log = logging.getLogger("webpanel.ai")
@@ -20,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user, require_admin
 from app.cache import get_redis
 from app.database import get_db
+from app.docker_client import exec_run_sync
 from app.models.ai_provider import AiProvider, AiProviderName
 from app.models.ai_session import AiSession, AiActivityLog
 from app.models.domain import Domain
@@ -30,9 +30,11 @@ router = APIRouter(prefix="/api/ai", tags=["ai"])
 # ── Encryption ────────────────────────────────────────────────────────────────
 
 def _build_fernet() -> Fernet:
-    key = os.environ.get("SECRET_KEY", "")
+    # H10: Use ENCRYPTION_KEY (same source as encrypt.py) instead of SECRET_KEY
+    # for at-rest encryption of AI provider credentials.
+    key = os.environ.get("ENCRYPTION_KEY", "") or os.environ.get("SECRET_KEY", "")
     if not key:
-        raise RuntimeError("SECRET_KEY environment variable is not set — cannot encrypt AI provider credentials.")
+        raise RuntimeError("No encryption key set — cannot encrypt AI provider credentials.")
     raw = hashlib.sha256(key.encode()).digest()
     return Fernet(base64.urlsafe_b64encode(raw))
 
@@ -213,30 +215,19 @@ async def _start_opencode(container: str, token: str, env: dict[str, str]) -> No
                 continue
             lines.append(f"{k}={v}")
         env_content = "\n".join(lines) + "\n"
+        env_dest = "/tmp/.ai_env"
 
         # Write env file via stdin (never via shell interpolation)
-        env_dest = "/tmp/.ai_env"
-        r = subprocess.run(
-            ["docker", "exec", "-i", container, "tee", env_dest],
-            input=env_content.encode(),
-            capture_output=True,
+        rc, out = exec_run_sync(container, ["tee", env_dest], stdin=env_content)
+        if rc != 0:
+            raise RuntimeError(f"Failed to write env file: {out}")
+        # Start opencode in background (detach)
+        exec_run_sync(
+            container,
+            ["sh", "-c", f"set -a && . {env_dest} && rm -f {env_dest} && opencode serve --port 7878"],
         )
-        if r.returncode != 0:
-            raise RuntimeError(f"Failed to write env file: {r.stderr.decode()}")
-
-        # Start opencode in background
-        r2 = subprocess.run(
-            ["docker", "exec", "-d", container, "sh", "-c",
-             f"set -a && . {env_dest} && rm -f {env_dest} && opencode serve --port 7878"],
-            capture_output=True,
-        )
-        # -d returns 0 even if command fails; we poll for readiness below
-        # This rm runs immediately after docker exec -d returns, deleting the env file promptly.
-        # The rm in the shell chain only runs when opencode exits — this is the effective delete.
-        subprocess.run(
-            ["docker", "exec", container, "rm", "-f", env_dest],
-            capture_output=True,
-        )
+        # Clean up env file
+        exec_run_sync(container, ["rm", "-f", env_dest])
 
     await loop.run_in_executor(None, _run)
 
@@ -247,12 +238,13 @@ async def _wait_ready(container: str, timeout: int = 20) -> bool:
 
     # We can't reach the container's localhost from outside, so probe via docker exec
     def _probe_exec():
-        r = subprocess.run(
-            ["docker", "exec", container, "sh", "-c",
+        rc, out = exec_run_sync(
+            container,
+            ["sh", "-c",
              "curl -sf http://localhost:7878/health || wget -q -O- http://localhost:7878/health"],
-            capture_output=True, timeout=3,
+            timeout=3,
         )
-        return r.returncode == 0
+        return rc == 0
 
     for _ in range(timeout):
         await asyncio.sleep(1)
@@ -402,10 +394,7 @@ async def stop_ai(
     container = ai_ctr or _container(domain_name)
     loop = asyncio.get_running_loop()
     def _kill():
-        subprocess.run(
-            ["docker", "exec", container, "sh", "-c", "pkill -f 'opencode serve' || true"],
-            capture_output=True, timeout=5,
-        )
+        exec_run_sync(container, ["sh", "-c", "pkill -f 'opencode serve' || true"], timeout=5)
     await loop.run_in_executor(None, _kill)
 
 
@@ -613,11 +602,8 @@ async def opencode_auth_login(
     ai_ctr = await get_or_create_ai_container("opencode", current)
 
     def _run_login():
-        r = subprocess.run(
-            ["docker", "exec", ai_ctr, "opencode", "auth", "login"],
-            capture_output=True, text=True, timeout=30,
-        )
-        return r.stdout.strip(), r.returncode
+        rc, out = exec_run_sync(ai_ctr, ["opencode", "auth", "login"], timeout=30)
+        return out.strip(), rc
 
     try:
         stdout, code = await loop.run_in_executor(None, _run_login)
@@ -666,11 +652,8 @@ async def opencode_auth_verify(
     ai_ctr = await get_or_create_ai_container("opencode", current)
 
     def _check_auth():
-        r = subprocess.run(
-            ["docker", "exec", ai_ctr, "opencode", "auth", "list"],
-            capture_output=True, text=True, timeout=15,
-        )
-        return r.stdout.strip(), r.returncode
+        rc, out = exec_run_sync(ai_ctr, ["opencode", "auth", "list"], timeout=15)
+        return out.strip(), rc
 
     try:
         stdout, code = await loop.run_in_executor(None, _check_auth)
@@ -724,10 +707,7 @@ async def opencode_auth_logout(
         ai_ctr = await get_or_create_ai_container("opencode", current)
 
         def _logout():
-            subprocess.run(
-                ["docker", "exec", ai_ctr, "opencode", "auth", "logout"],
-                capture_output=True, timeout=10,
-            )
+            exec_run_sync(ai_ctr, ["opencode", "auth", "logout"], timeout=10)
 
         await loop.run_in_executor(None, _logout)
     except Exception as exc:
