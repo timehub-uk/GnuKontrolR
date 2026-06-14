@@ -1,4 +1,4 @@
-FROM alpine:3.19
+FROM alpine:3.24
 RUN apk add --no-cache python3 py3-pip ffmpeg
 RUN pip3 install --break-system-packages flask gunicorn
 WORKDIR /app
