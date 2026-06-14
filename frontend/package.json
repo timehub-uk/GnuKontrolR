@@ -29,7 +29,7 @@
     "xterm": "^5.3.0",
     "xterm-addon-fit": "^0.8.0",
     "zod": "^4.3.6",
-    "zustand": "^5.0.12"
+    "zustand": "^5.0.14"
   },
   "overrides": {
     "follow-redirects": ">=1.16.0",
