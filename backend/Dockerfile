@@ -15,7 +15,7 @@ COPY frontend/ ./
 RUN mkdir -p /opt/gnukontrolr/frontend/dist && npm run build
 
 # ── Stage 2: Python dependency builder ───────────────────────────────────────
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc libffi-dev libssl-dev build-essential \
@@ -29,7 +29,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 
 LABEL maintainer="GnuKontrolR"
 LABEL description="GnuKontrolR panel API — FastAPI + uvicorn"
