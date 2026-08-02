@@ -5,7 +5,7 @@
 #   runtime           — slim image with both outputs baked in
 
 # ── Stage 1: React frontend build ────────────────────────────────────────────
-FROM node:20-slim AS frontend-builder
+FROM node:25-slim AS frontend-builder
 
 WORKDIR /frontend
 COPY frontend/package*.json ./
